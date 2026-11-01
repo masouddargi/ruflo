@@ -14,6 +14,7 @@ import { feedbackPatternsSchema, validateFeedbackPatterns } from '../memory/feed
 
 import type { MCPTool } from './types.js';
 import { validateIdentifier, validateText } from './validate-input.js';
+import { agentdbEpisodeCrudTools } from './agentdb-episode-tools.js';
 
 // ===== Shared validation helpers =====
 
@@ -97,6 +98,19 @@ async function bridgeUnavailableResult(): Promise<{ error: string; hint: string 
     error: 'graph_edges DB unavailable (sql.js could not load)',
     hint: 'Check Node version + try `ruflo memory init` to initialize manually.',
   };
+}
+// #4135 / #4161: graph reads (agentdb_graph-query, agentdb_graph-pathfinder) open the
+// graph_edges database; under encryption at rest that file is an RFE1 blob they cannot
+// open. A recorded edge is then unreadable even though the write reports success, so the
+// write says so instead of letting a caller assume it can read the edge back.
+async function unreadableEdgeWarning(): Promise<string | undefined> {
+  try {
+    const { isBridgeDbEncryptedAtRest } = await getGraphEdgeWriter();
+    if (!isBridgeDbEncryptedAtRest()) return undefined;
+    return 'Edge recorded, but graph reads (agentdb_graph-query, agentdb_graph-pathfinder) cannot open the graph_edges database because it is encrypted at rest (RFE1), so this edge cannot be read back yet. Your data is intact (#2889, #4135).';
+  } catch {
+    return undefined;
+  }
 }
 let memInitMod: typeof import('../memory/memory-initializer.js') | null = null;
 async function getMemInit() {
@@ -568,7 +582,9 @@ export const agentdbCausalEdge: MCPTool = {
             // Also record in AgentDB bridge for compatibility
             const bridge = await getBridge();
             await bridge.bridgeRecordCausalEdge({ sourceId, targetId, relation, weight: typeof params.weight === 'number' ? validateScore(params.weight, 0.5) : undefined }).catch(() => {});
-            return { ...graphResult, _graphNodeBackend: true, ...(legacyWarning && { warning: legacyWarning }) };
+            const unreadable = await unreadableEdgeWarning();
+            const warning = [legacyWarning, unreadable].filter(Boolean).join(' ');
+            return { ...graphResult, _graphNodeBackend: true, ...(unreadable && { readable: false }), ...(warning && { warning }) };
           }
         }
       } catch { /* graph-node not available, fall through */ }
@@ -581,7 +597,9 @@ export const agentdbCausalEdge: MCPTool = {
         weight: typeof params.weight === 'number' ? validateScore(params.weight, 0.5) : undefined,
       });
       const baseResult = result ?? { success: false, error: 'AgentDB bridge not available. Use memory_store/memory_search instead.' };
-      return legacyWarning ? { ...baseResult, warning: legacyWarning } : baseResult;
+      const unreadable = baseResult.success === false ? undefined : await unreadableEdgeWarning();
+      const warning = [legacyWarning, unreadable].filter(Boolean).join(' ');
+      return warning ? { ...baseResult, ...(unreadable && { readable: false }), warning } : baseResult;
     } catch (error) {
       return { success: false, error: sanitizeError(error) };
     }
@@ -624,12 +642,16 @@ export const agentdbRoute: MCPTool = {
 
 export const agentdbSessionStart: MCPTool = {
   name: 'agentdb_session-start',
-  description: 'Start a session with ReflexionMemory episodic replay Use when generic memory_* tools are wrong because you need AgentDB-specific controllers (HNSW vector search, hierarchical tiers, causal-graph links, pattern store/recall, RaBitQ quantization). For simple key-value persistence, memory_store/memory_retrieve are simpler. For unrelated file work, native Read/Write are fine.',
+  description: 'Start a session with ReflexionMemory episodic replay. Set recall=true with a context to get back past session episodes relevant to it (keyword + vector search; rerank=true adds a local cross-encoder, ~200 ms). Use when generic memory_* tools are wrong because you need AgentDB-specific controllers (HNSW vector search, hierarchical tiers, causal-graph links, pattern store/recall, RaBitQ quantization). For simple key-value persistence, memory_store/memory_retrieve are simpler. For unrelated file work, native Read/Write are fine.',
   inputSchema: {
     type: 'object',
     properties: {
       sessionId: { type: 'string', description: 'Session identifier' },
       context: { type: 'string', description: 'Session context for pattern retrieval' },
+      recall: { type: 'boolean', description: 'Also return past session episodes relevant to context', default: false },
+      k: { type: 'number', description: 'Episodes to recall (1-50)', default: 5 },
+      hybrid: { type: 'boolean', description: 'Keyword + vector search; false = vector only', default: true },
+      rerank: { type: 'boolean', description: 'Rerank with a local cross-encoder (~200 ms, 23 MB model on first use)', default: false },
     },
     required: ['sessionId'],
   },
@@ -644,6 +666,10 @@ export const agentdbSessionStart: MCPTool = {
       const result = await bridge.bridgeSessionStart({
         sessionId,
         context: validateString(params.context, 'context', 10_000) ?? undefined,
+        recall: params.recall === true,
+        k: validatePositiveInt(params.k, 5, 50),
+        hybrid: params.hybrid !== false,
+        rerank: params.rerank === true,
       });
       return result ?? { success: false, error: 'AgentDB bridge not available. Use memory_store/memory_search instead.' };
     } catch (error) {
@@ -680,6 +706,52 @@ export const agentdbSessionEnd: MCPTool = {
         tasksCompleted: validatePositiveInt(params.tasksCompleted, 0, 10_000),
       });
       return result ?? { success: false, error: 'AgentDB bridge not available. Use memory_store/memory_search instead.' };
+    } catch (error) {
+      return { success: false, error: sanitizeError(error) };
+    }
+  },
+};
+
+// ===== agentdb_episode-recall — agentdb 3.2 hybrid episode retrieval (ADR-519) =====
+
+export const agentdbEpisodeRecall: MCPTool = {
+  name: 'agentdb_episode-recall',
+  description: 'Recall past episodes (session summaries, distilled trajectories) relevant to a task, ranked by keyword + vector search. rerank=true adds a local cross-encoder for better ordering at ~200 ms per call. Use when you want what happened last time on similar work; for key-value entries use memory_search.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'What you are about to work on' },
+      k: { type: 'number', description: 'Episodes to return (1-50)', default: 5 },
+      hybrid: { type: 'boolean', description: 'Keyword + vector search; false = vector only', default: true },
+      rerank: { type: 'boolean', description: 'Rerank with a local cross-encoder (~200 ms, 23 MB model on first use)', default: false },
+      onlySuccesses: { type: 'boolean', description: 'Only episodes recorded as successes' },
+      onlyFailures: { type: 'boolean', description: 'Only episodes recorded as failures' },
+      minReward: { type: 'number', description: 'Minimum reward (0-1)' },
+      timeWindowDays: { type: 'number', description: 'Only episodes from the last N days' },
+    },
+    required: ['query'],
+  },
+  handler: async (params: Record<string, unknown>) => {
+    try {
+      const vQuery = validateText(params.query, 'query', 10_000);
+      if (!vQuery.valid) return { success: false, error: vQuery.error };
+      const query = validateString(params.query, 'query', 10_000);
+      if (!query || !query.trim()) return { success: false, error: 'query is required (non-empty string)' };
+      if (params.onlySuccesses === true && params.onlyFailures === true) {
+        return { success: false, error: 'onlySuccesses and onlyFailures are mutually exclusive' };
+      }
+      const bridge = await getBridge();
+      const result = await bridge.bridgeRecallEpisodes({
+        task: query,
+        k: validatePositiveInt(params.k, 5, 50),
+        hybrid: params.hybrid !== false,
+        rerank: params.rerank === true,
+        onlySuccesses: params.onlySuccesses === true,
+        onlyFailures: params.onlyFailures === true,
+        ...(typeof params.minReward === 'number' && Number.isFinite(params.minReward) ? { minReward: validateScore(params.minReward, 0) } : {}),
+        ...(params.timeWindowDays !== undefined ? { timeWindowDays: validatePositiveInt(params.timeWindowDays, 30, 3650) } : {}),
+      });
+      return result ?? { success: false, error: 'AgentDB ReflexionMemory not available. Use memory_search instead.' };
     } catch (error) {
       return { success: false, error: sanitizeError(error) };
     }
@@ -1138,6 +1210,9 @@ export const agentdbGraphQuery: MCPTool = {
         } catch (error) {
           return { success: false, error: `Retained SQL graph query failed: ${sanitizeError(error)}`, mode, nodeId };
         }
+        // #4135: name the real reason when the retained store is encrypted at rest.
+        const encryptedAtRest = await getGraphEdgeWriter().then((w) => w.isBridgeDbEncryptedAtRest()).catch(() => false);
+        if (encryptedAtRest) return { success: false, ...(await bridgeUnavailableResult()), mode, nodeId };
         return { success: false, error: 'Retained SQL graph_edges backend is unavailable for k-hop query', mode, nodeId };
       }
 
@@ -1535,6 +1610,8 @@ export const agentdbTools: MCPTool[] = [
   agentdbRoute,
   agentdbSessionStart,
   agentdbSessionEnd,
+  agentdbEpisodeRecall,    // ADR-519
+  ...agentdbEpisodeCrudTools, // ADR-520
   agentdbHierarchicalStore,
   agentdbHierarchicalRecall,
   agentdbHierarchicalDelete,

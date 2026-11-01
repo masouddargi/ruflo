@@ -1731,7 +1731,8 @@ jobs:
     # peer, (B) no bare-stable peer range that can't resolve a 3.x prerelease
     # publish, (C) every main/module/exports path is covered by `files`,
     # (D) after building each plugin, every main/module/exports path exists on
-    # disk (#1904). The build step is what makes check D live.
+    # disk (#1904). The build step is what makes check D live. Also runs the
+    # ADR-506 plugin secrets audit (sensitive userConfig, no literal secrets).
     name: Plugin package install-safety (#1902/#1903/#1904)
     runs-on: ubuntu-latest
 
@@ -1783,6 +1784,12 @@ jobs:
       - name: Run plugin package audit
         shell: bash
         run: node scripts/audit-plugin-packages.mjs
+
+      - name: Run plugin secrets audit (ADR-506)
+        # A credential-named userConfig option must be "sensitive": true (credential store, masked),
+        # and no plugin.json / hooks.json may carry a literal secret (the mods' screen shapes).
+        shell: bash
+        run: node scripts/audit-plugin-secrets.mjs
 
       - name: Run package dep-overlap audit (#1147 / #2018)
         # Static guard for the "Invalid Version: " npm 11.x crash. Any package
@@ -1838,6 +1845,19 @@ jobs:
         # workspace source, which is exactly what makes it easy to miss.
         shell: bash
         run: node scripts/audit-leaf-package-publish.mjs
+
+      - name: Run leaf-versions-published audit (#4303)
+        # audit-wrapper-dep-ranges.mjs and audit-leaf-package-publish.mjs above
+        # only check that the CLI's pin and the leaf's own workspace version
+        # agree with EACH OTHER. #4303 slipped through both: #4279 bumped
+        # @claude-flow/memory to 3.0.6 in the workspace and pinned the CLI to
+        # match, so both audits were green — but nobody ran the standalone
+        # `npm publish` for memory, so @claude-flow/cli@3.57.2 shipped
+        # depending on a version that didn't exist, and every fresh install
+        # failed with ETARGET. This queries the live npm registry so a pin
+        # bump that outruns its own publish fails CI instead of shipping.
+        shell: bash
+        run: node scripts/audit-leaf-versions-published.mjs
 
       - name: Run better-sqlite3 override audit (#2219)
         # agentdb pins better-sqlite3 as an OPTIONAL dep at ^11.8.1, which has

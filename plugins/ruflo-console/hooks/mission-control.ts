@@ -23,24 +23,12 @@ import { CLI_PREFIXES, type State } from './state'
 import type { Derived, LedgerEvent, LedgerTask, McState, McTab, MissionActions, MissionRecord } from './mission-types'
 
 import { checkpointPlan } from './mission-advisor-live'
+import { adoptLegacy, type AdoptResult, dismissLegacy, mcOf, saveLedger } from './mission-ledger'
 import { cancelSpec, createSpec, createWhy, dispatchSpec, isInflight, MAX_HANDOUTS, resultOf, setPaused } from './mission-specs'
 
 export { cancelSpec, createSpec, createWhy, dispatchSpec, resultOf, setPaused }
+export { adoptLegacy, dismissLegacy, LEDGER_KEY, ledgerKeyOf, loadLedger, mcOf, saveLedger } from './mission-ledger'
 export type { Derived, LedgerEvent, LedgerTask, McState, McTab, MissionActions, MissionRecord } from './mission-types'
-
-const states = new WeakMap<State, McState>()
-export const LEDGER_KEY = 'mission-ledger'
-
-export function mcOf(state: State): McState {
-  let found = states.get(state)
-
-  if (found === undefined) {
-    found = { goal: '', profile: 'feature', rigor: 'standard', isProfilePicked: false, planned: null, missions: new Map(), active: null, tab: 'plan', lastGuide: '', guidance: null, screen: null, isScreenOn: true, last: null }
-    states.set(state, found)
-  }
-
-  return found
-}
 
 export const activeMission = (state: State): MissionRecord | null => {
   const mc = mcOf(state)
@@ -119,6 +107,28 @@ export const progressOf = (mission: MissionRecord, tasks: readonly TaskRecord[])
   return { done: [...status.values()].filter(value => value === 'done').length, total: mission.tasks.length }
 }
 
+/** Whether the mission is over: cancelled, or every task done in the task store (a mission with no tasks is not). The record's own state is not read: it stays `planned` until the executor exists. */
+export function isOver(mission: MissionRecord, tasks: readonly TaskRecord[]): boolean {
+  const { done, total } = progressOf(mission, tasks)
+
+  return mission.cancelled || (total > 0 && done >= total)
+}
+
+/**
+ * The mission the goal on screen belongs to, or null when that goal still has to become one. The active mission stays active until another is
+ * created, so one that is over (finished in the task store, or cancelled) must not stand in for a goal planned after it: that goal gets its own
+ * create, and only the person's press creates it. A finished mission's own goal still belongs to it, since its plan stays on screen after the
+ * create and a second create would only duplicate it; a cancelled mission's does not, so it can be tried again.
+ */
+export function missionOfGoal(state: State): MissionRecord | null {
+  const mc = mcOf(state)
+  const mission = activeMission(state)
+
+  if (mission === null || mc.planned === null || !isOver(mission, state.snapshot?.tasks ?? [])) return mission
+
+  return mission.cancelled || mc.goal !== mission.objective ? null : mission
+}
+
 /** How many of the mission's tasks the ruflo task store shows as failed. */
 export const failedOf = (mission: MissionRecord, tasks: readonly TaskRecord[]): number => [...derive(mission, tasks).values()].filter(value => value === 'failed').length
 
@@ -143,33 +153,6 @@ export function record(mission: MissionRecord, event: Omit<LedgerEvent, 'seq' | 
 
   mission.events.push({ seq, atMs: Date.now(), ...event })
   if (mission.events.length > 500) mission.events.splice(0, mission.events.length - 500)
-}
-
-export function saveLedger(state: State, host: Host): void {
-  const mc = mcOf(state)
-
-  void host.storeSet(LEDGER_KEY, { active: mc.active, missions: [...mc.missions.values()].slice(-20) }).catch(() => undefined)
-}
-
-export async function loadLedger(state: State, host: Host): Promise<void> {
-  const saved = await host.storeGet(LEDGER_KEY).catch(() => undefined)
-  const missions = (saved as { missions?: unknown } | undefined)?.missions
-  const mc = mcOf(state)
-
-  if (!Array.isArray(missions)) return
-
-  for (const raw of missions.slice(0, 20)) {
-    const m = raw as MissionRecord
-
-    const isShaped = Array.isArray(m?.tasks) && m.tasks.every(task => typeof task?.id === 'string' && Array.isArray(task.dependsOn)) && Array.isArray(m.events)
-
-    // Auto-run never survives a restart: a new session starts by asking.
-    if (typeof m?.id === 'string' && /^msn_[a-f0-9]{24}$/.test(m.id) && isShaped) mc.missions.set(m.id, { ...m, auto: false, ...(Array.isArray(m.adrs) && { adrs: m.adrs.filter(file => typeof file === 'string' && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,119}\.md$/.test(file)).slice(0, 8) }) })
-  }
-
-  const active = (saved as { active?: unknown }).active
-
-  if (typeof active === 'string' && mc.missions.has(active)) mc.active = active
 }
 
 /**
@@ -215,6 +198,14 @@ export function researchOf(state: State): ResearchDraft {
 }
 
 export const setResearch = (state: State, patch: Partial<ResearchDraft>): void => void Object.assign(researchOf(state), patch)
+
+/** What Mission Control says after the person adopts one offered mission (#4254). */
+const ADOPT_SAYS: Record<AdoptResult, [string, boolean, string]> = {
+  adopted: ['adopted 1 mission', true, 'recorded under this project and removed from the old shared ledger'],
+  none: ['nothing to adopt', false, 'that mission is no longer offered here'],
+  full: ['not adopted', false, 'it is older than the 20 missions this project keeps, so the save would drop it; it stays offered'],
+  failed: ['not adopted', false, 'the store refused the write; the mission is still in the old shared ledger'],
+}
 
 const wired = new WeakMap<State, { host: Host; actions: MissionActions; research: () => void | Promise<void> }>()
 
@@ -345,6 +336,13 @@ export function missionActions(state: State, host: Host, runner: Runner): Missio
       if (mc.missions.has(id)) mc.active = id
       saveLedger(state, host)
       host.invalidate()
+    },
+    adoptLegacy: id => {
+      void adoptLegacy(state, host, id).then(result => say(...ADOPT_SAYS[result]))
+    },
+    dismissLegacy: id => {
+      dismissLegacy(state, host, id)
+      say('not this project\'s', true, `${id === undefined ? 'the older missions stay' : 'it stays'} in the shared ledger for the project ${id === undefined ? 'they were' : 'it was'} made in`)
     },
     next: () => {
       const mission = activeMission(state)

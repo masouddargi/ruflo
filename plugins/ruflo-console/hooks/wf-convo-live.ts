@@ -14,6 +14,7 @@ import { payloadOf, sendTo, type SendDeps, tidy } from './data/wf-send'
 import { parseConfig, peersOf, targetsOf, type Config, type PeerRef, type Target } from './data/wf-targets'
 import { jsonAfter } from './data/cli'
 import { plain } from './data/parse'
+import { isWindowsPath } from './data/paths'
 import type { WfRun } from './data/workflows'
 import type { Host } from './host'
 import { CLI_PREFIXES, type State } from './state'
@@ -80,7 +81,12 @@ export async function refreshFacts(state: State, nowMs: number): Promise<void> {
 
   if (live.home !== null) live.peers = peersOf(await host.fs.read(`${live.home}/.claude/federation/peers.json`).then(text => (text.length > 200_000 ? null : text), () => null))
 
-  const found = await host.run(['which', 'codex'], 3000).catch(() => undefined)
+  // `where` is Windows' `which`; call System32\where.exe to prevent binary-planting from the current directory
+  const systemRoot = (typeof process !== 'undefined' && process.env?.SystemRoot) || 'C:\\Windows'
+  const finder = live.home !== null && isWindowsPath(live.home)
+    ? `${systemRoot.replace(/[\\/]+$/, '')}\\System32\\where.exe`
+    : 'which'
+  const found = await host.run([finder, 'codex'], 3000).catch(() => undefined)
 
   live.hasCodex = found !== undefined && found.exitCode === 0
   host.invalidate()
@@ -113,6 +119,8 @@ export function depsOf(state: State): SendDeps | null {
     cwd: state.cwd,
     hive: state.snapshot?.hive ?? null,
     config: live.config,
+    // Windows has no printenv: the engine's own environment read supplies a model key there.
+    ...(host.env !== undefined && live.home !== null && isWindowsPath(live.home) && { readEnv: host.env }),
   }
 }
 
@@ -251,7 +259,10 @@ export async function saveTranscript(state: State, target: Target, ask: (spec: A
   if (host === undefined || thread === undefined || thread.msgs.length === 0) return ask(null, 'this thread has nothing to save yet')
 
   const roots = { cwd: state.cwd, scratch: null }
-  const wanted = resolveExportPath(`${state.cwd.replace(/\/+$/, '')}/${EXPORT_DIR}/${transcriptName(target.id, Date.now())}`, roots)
+  // #4356: pass the relative name and let resolveExportPath join it onto roots.cwd itself —
+  // pre-joining here produced a Windows drive cwd (`C:\...`) inside `input`, which the
+  // function's own backslash guard then refused outright.
+  const wanted = resolveExportPath(`${EXPORT_DIR}/${transcriptName(target.id, Date.now())}`, roots)
 
   if (!wanted.ok) return ask(null, wanted.why)
 

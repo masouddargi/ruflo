@@ -6,7 +6,8 @@
 
 import { EventEmitter } from 'events';
 import express, { Express, Request, Response, NextFunction } from 'express';
-import { createServer, Server } from 'http';
+import { createServer, Server, type IncomingMessage } from 'http';
+import { assertSafeBind, bearerToken, refuseOpenRequest } from './guard.js';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -34,6 +35,8 @@ export interface HttpTransportConfig {
   corsEnabled?: boolean;
   corsOrigins?: string[];
   auth?: AuthConfig;
+  /** Accept a non-loopback bind with no token (the operator's own risk). */
+  allowUnauthenticated?: boolean;
   maxRequestSize?: string;
   requestTimeout?: number;
   rateLimit?: {
@@ -80,11 +83,16 @@ export class HttpTransport extends EventEmitter implements ITransport {
       port: this.config.port,
     });
 
+    assertSafeBind(this.config.host, this.config.auth?.enabled === true, this.config.allowUnauthenticated);
+
     this.server = createServer(this.app);
 
     this.wss = new WebSocketServer({
       server: this.server,
       path: '/ws',
+      // CORS does not apply to upgrades, so a token-less server checks Host and Origin itself.
+      verifyClient: (info: { req: IncomingMessage }) =>
+        this.config.auth?.enabled === true || refuseOpenRequest(info.req, this.config.host, this.config.corsOrigins) === undefined,
     });
 
     this.setupWebSocketHandlers();
@@ -183,6 +191,18 @@ export class HttpTransport extends EventEmitter implements ITransport {
   }
 
   private setupMiddleware(): void {
+    // A server with no token must not answer a web page or a rebound hostname.
+    if (this.config.auth?.enabled !== true) {
+      this.app.use((req: Request, res: Response, next: NextFunction) => {
+        const why = refuseOpenRequest(req, this.config.host, this.config.corsOrigins);
+        if (why === undefined) {
+          next();
+          return;
+        }
+        res.status(403).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: `Forbidden: ${why}` } });
+      });
+    }
+
     this.app.use(helmet({
       contentSecurityPolicy: false,
     }));
@@ -585,13 +605,8 @@ export class HttpTransport extends EventEmitter implements ITransport {
   }
 
   private validateAuth(req: Request): { valid: boolean } {
-    const auth = req.headers.authorization;
-    if (typeof auth !== 'string') {
-      return { valid: false };
-    }
-
-    const tokenMatch = auth.match(/^Bearer\s+(.+)$/i);
-    if (!tokenMatch) {
+    const given = bearerToken(req.headers.authorization);
+    if (!given) {
       return { valid: false };
     }
 
@@ -600,7 +615,7 @@ export class HttpTransport extends EventEmitter implements ITransport {
     let valid = false;
     for (const validToken of tokens) {
       // No early exit, so timing does not depend on which token matched.
-      if (this.timingSafeCompare(tokenMatch[1], validToken)) {
+      if (this.timingSafeCompare(given, validToken)) {
         valid = true;
       }
     }

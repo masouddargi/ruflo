@@ -2,6 +2,124 @@
 
 Newest first. One `## <version> — <date>` heading per version, then `feat:`, `fix:`, `breaking:` and `chore:` bullets (ADR-478). Built from git history; older versions: `git log -- plugins/ruflo-console`.
 
+## 0.49.8 — 2026-10-31
+- chore: the plugin map gives the two new external marketplace plugins a home section, `agentdb` under Memory and `agentic-flow` under Learning, so their commands launch from the console (ADR-518).
+
+## 0.49.7 — 2026-10-27
+- fix: Claude can clear Project Anatole alerts through the console again. `console_run anatole-ack-<id>` (and every other Anatole change or read Claude ran) failed with "command.run: called from a tool.call hook, it would wait on the turn this hook is holding", so nothing was acked and the Security page kept every alert open. The console sent `/protector` and waited for its answer inside Claude's tool call, and the host refuses a slash command while that call holds the turn (a clock tick and `immediate` do not get around it). The console now sends `/protector` without waiting and retries for about a minute while the host still reports the turn as held. Claude's reply says "Queued", not "Done", and the mod applies the ack when the turn ends. The outcome and the Result panel update when the mod answers. Acks still go through the console's confirm and Claude-control level, and the alert file is never edited directly (#4545).
+
+## 0.49.6 — 2026-10-27
+- fix: Mission Control offers to create a mission for a new goal once the active mission is over. The active mission stayed active for ever, so after a mission finished (every task done in the ruflo task store) or was cancelled, a goal typed after it was planned but the NEXT STEP box showed "Create the mission and its tasks" as done, with the old mission's id and no create button, and nothing turned the new plan into a mission. Now the create step is the next step, with its ✚ create button (AIDefence still blocks an unsafe goal), and the run step waits for the mission it will make. Pressing it asks first, as always, then makes the new mission the active one and keeps the old one in the picker and the saved ledger. Nothing is created unasked. A mission that is still going keeps its re-plan in place, a finished mission's own goal is not offered a second time, and a cancelled mission's goal can be created again. The menu's goal box says "create it as another mission" instead of "planned in place of this one" for a mission that is over.
+
+## 0.49.5 — 2026-10-26
+- fix: a mission no longer disappears when the console runs from a different plugin store (for example loaded inline in one session and from the marketplace install in the next). The ledger is kept in the plugin's own host store, which is a separate file per plugin source, so the second store had no ledger for the project and Mission Control showed no mission. Each save now also writes a copy to `.claude-flow/console/mission-ledger.json` (the console's git-ignored folder), and a load that finds no ledger for the project in the store offers the missions recorded for this project from that copy, through the same offer as missions from before per-project storage (one yes adopts each). The copy is a file a cloned repository can ship, so nothing from it is adopted, stored or made the active mission unasked, and an empty ledger never overwrites it. A store that already has a ledger is left alone, another project's missions in the copy are ignored, and a host with no file API behaves as before.
+
+## 0.49.4 — 2026-10-26
+- fix: creating a mission no longer fails on Windows with "The command line is too long." The plan (about 7 KB, with about 750 quotes) was passed as one `mcp exec -p` argument, which passes cmd.exe's 8191-character line once Windows argv quoting escapes it; the goal's length did not matter. The plan now goes in a file under `.claude-flow/missions/` and is submitted with `ruflo mission plan --plan-file` (same service and answer as `mission_plan`). It is the same on every platform: the file is written through `write-via` (the host file API on Windows).
+
+## 0.49.3 — 2026-10-25
+- fix: the install record for a plugin installed more than once no longer comes from another project (#4496). With no record for this folder and no user-scope record the console now reports "not installed here" instead of showing the first record's version and install folder, and among records that apply the one with the longest `projectPath` wins, so a record for the exact project beats one for a parent folder.
+
+## 0.49.2 — 2026-10-25
+- fix: Windows autopilot path guards and binary-planting hardening (#4491). Matches extended namespaces (`\\?\`), device paths (`\\.\`), drive-relative paths (`C:foo`), and UNC forward-slash shares; denies envelope edits under backslashes; rejects root drive envelope paths and `.bat`/`.cmd` targets; hardens against NTFS alternate data streams and parent traversals; and resolves `powershell.exe` and `where.exe` explicitly from System32.
+
+## 0.49.1 — 2026-10-25
+- fix: the Plugin Catalog reads the marketplace clone on Windows. The clone's location is a drive path (`C:\Users\…\marketplaces\ruflo`), and the catalog refused anything not starting with `/`, so it said "the clone's marketplace.json is not readable" while the file was there. The catalog, each plugin's folder, and the plugins view's freshness row now use the shared path helpers (`paths.ts`).
+- fix: **forget history** (Events) and **forget saved views** (Workflows) work on Windows. They ran `rm -f`, which Windows does not have; there the files are emptied through the host file API (saved views as a valid empty document) and the result is verified by what the file holds. Linux and macOS are unchanged.
+- fix: ADR status changes on records with CRLF line endings (git autocrlf on Windows). A MADR record failed with "the front matter is not closed", and other formats got mixed endings; records are now edited as LF text and written back with their own endings.
+- fix: the standalone terminal (`ruflo tui`) draws in colour on Windows. It treated an unset `TERM` as "no terminal", but Windows Terminal, PowerShell and cmd leave `TERM` unset; only `TERM=dumb` or `NO_COLOR` turn colour off there.
+- fix: the Conversation board finds codex on Windows with `where` (there is no `which`).
+- fix: mission spend works on Windows (needs ruflo-cost-tracker 0.28.3, which fixes the ledger script itself).
+- fix: the autopilot's text checks know Windows (groundwork: a start is still refused there). A task naming `C:\…`, `\\share\…`, `..\…`, `%USERPROFILE%\…` or `$env:USERPROFILE\…` is checked against the envelope folders; `rmdir /s`, `del C:\`, `format C:`, `Remove-Item -Recurse` and `rm -rf C:\` are hard denies; a verify command may not be `cmd`, `powershell`, `pwsh`, `wsl`, `bash.exe` and the like, by basename under either separator and without `.exe`. These only park or refuse more.
+- fix: the Overview heading names the last two folders of a Windows project (`ruflo state in x/proj`), where it printed the whole `C:\…` path because it split on `/` only.
+- fix: stopping or messaging a workflow run on Windows finds its task id in a session transcript over 2 MB. The search used `grep`; Windows now uses PowerShell's `Select-String` (path and pattern passed as base64, never parsed as PowerShell).
+- fix: on Windows, which has no `printenv`, the OpenRouter key (`$OPENROUTER_API_KEY`) is read through the engine's environment read. The engine allows only a literal variable name there (`claude plugin validate` refuses a computed one, and the mod then does not load, so `/ruflo` is missing), so another endpoint's key cannot be read on Windows and the send says so instead of claiming the variable is unset.
+- chore: the smoke runs Claude Code's own `claude plugin validate` on the plugin (step 21, skipped without the CLI), and a spec checks that every `$.env.get/set` takes a literal name.
+- fix: a send to a federation peer on Windows says why nothing was sent. The helper is a bash script, and `bash` on a Windows PATH is the WSL launcher, which cannot open a `C:…` path.
+- fix: for a resumed run, the task id from a search is the latest launch, not the first. The search prints matches with no closing brace between them, so the pattern ran across both (any platform).
+- fix: the standalone terminal (`ruflo tui`) reads the installed plugins, the marketplaces and the workflow runs when `CLAUDE_CONFIG_DIR` is not set. Its config folder was left empty; it now falls back to `<home>/.claude` as the engine does (any platform; found by running every view against a real Windows machine).
+- fix: three folder guards (run folders, run files, cost paths) saw `..` only between slashes, so a `..` segment passed on Windows; a config folder ending in a backslash did not match. They use the shared Windows-aware path helpers.
+- fix: the Research section finds ruflo-goals on Windows (it had its own POSIX-only install-path check), and the menu and boot screen name the project by its last folder instead of the whole `C:…` path.
+- fix: the version and install folder the console shows for a plugin installed for several projects are those of the install that applies to this project (the project record, else the user one), not the first record in `installed_plugins.json`, which could be another project's. The updater uses the same Windows-aware comparison, so a session in a subfolder of the project, or with a different drive-letter case, no longer leaves the project's own install stale.
+- chore: `views/pane` reads `menuView` at call time (a cycle through mission-control and model-tools left it undefined when a test loaded the menu first), and `tui-actions` waits for the outcome it checks instead of a fixed 1.2 s. The whole spec set passes on Windows.
+- chore: the real-disk POSIX write specs (modes, FIFOs) are skipped on Windows, which writes through the host file API; one `ruflo tui --plain` spec no longer needs a runnable fake codex there.
+
+## 0.49.0 — 2026-10-24
+- feat: exact managed session controls in the model palette with existing confirmation and permission gates
+- fix: a rescheduling session shows as running, and a session stopped at its budget, waiting on a required action or holding an open tool request shows as active instead of finished
+- feat: first class managed sessions in Workflows with reported budgets, remote blockers and host checked controls
+- feat: advisory managed learning evidence and recommendations in Learning
+- fix: provider completion never becomes a verified correctness badge; local snapshot flags are not authority
+
+## 0.48.0 — 2026-10-24
+- feat: ruRE can read a folder outside the project that you allow (ADR-499). New option `rureFolders` (`name=/absolute/folder; name2=…`); a ruRE sample then names it as `@name/sub/file`. Changing the option is an install-class change that always waits for your Yes (Claude's console tools can only propose it at the full control level), so Claude can reach an outside folder only through a name you defined. A folder that is a link, a link anywhere below it, `..`, an absolute path typed as a sample, an unknown name, and a filesystem root are all refused; ruRE still only parses.
+- chore: the preflight of a ruRE row now receives the console's options (same line count in the runner).
+
+## 0.47.0 — 2026-10-23
+- feat: a **CUDA** row on the ruRE page (ADR-497) for the new `rure_analyze_cuda` tool: for a CUDA program, a `.cubin`, a `.fatbin` or a `.ptx` it shows the fatbin entries (kind, target `sm_NN`, compression), each kernel with its register count, code size and constant/shared memory, and the PTX version, target and kernel names. Needs a ruflo CLI that has the tool (the release after 3.60.1); on an older one the row says to update, as the other ruRE rows do.
+- feat: DETECT sends `.cubin`, `.fatbin` and `.ptx` files to the CUDA row, and the native-binary row says "holds CUDA code" for a program with a `.nv_fatbin` section, pointing at it.
+- chore: help topic, row copy and Claude's `console_run dt-re-cuda <path>` cover the new row; `console_state`'s `rure` block carries its result like the others'.
+
+## 0.46.0 — 2026-10-23
+- feat: ruRE DETECT (ADR-496). One row for any file or folder: a folder is read as JavaScript / Electron source, a `.hex`, `.evm` or `.bytecode` file as EVM bytecode, everything else as a native binary, and the result says which reader was chosen. It never unpacks an `.asar` (the one reader that writes): it names UNPACK .ASAR, which asks first. A `.dll` or `.exe` says it may be a .NET assembly and names the row that tells. The choice comes from the folder/file kind and the extension, not the file's bytes (the host hands back text).
+- feat: long ruRE lists (imports, exports, libraries, sections, strings, selectors, types) get lines of their own, wrapped, up to 60 items each, and the panel keeps up to 120 lines (was 40, with each list cut at 8 to 14 items). A list that fits one line is unchanged.
+- feat: Claude sees what a ruRE run found. `console_run` answers with the result lines and `console_state` carries a `rure` block (reader, label, caveats first, lines), every string through the model path and marked as the analyzed file's own text.
+- chore: `ActionSpec.preflight` may now return replacement arguments, label, lab id, note and reader as well as a refusal (ADR-495 added it).
+
+## 0.45.2 — 2026-10-23
+- fix: ruRE refuses a sample that is a link, or sits behind one (ADR-495). The text rule only stopped `..` and absolute paths; a link inside the project that pointed outside it was opened by the tool. Every ruRE row now walks the sample on disk first and shows the reason without starting anything, for the page and for Claude's `/ruflo run dt-re-*` alike. Adds a general `preflight` to actions.
+- chore: ruRE source comments cite ADR-494 (they said 492).
+
+## 0.45.1 — 2026-10-23
+- fix: broader Windows parity for the console (#4036, thanks @socrates6969) — the narrow 0.44.2 and 0.44.7 fixes extended across the whole plugin. The path helpers are consolidated into `hooks/data/paths.ts` (`isWindowsPath`, `isAbsolutePath`, `trimTrailing`, `joinPath`, `samePath`, `hasParentSegment`, `below`, `normalizePath`, `homeOf`) and the earlier narrower `abs-path.ts` is removed (its two sites move to the consolidated module).
+- fix: workspace keys ignore drive-letter case and trailing-separator differences, so `c:\work\app\` and `C:\Work\app` are one workspace with one remembered page and one terminal history.
+- fix: any confirmed action whose on-disk check fails is re-checked once after one second (new `VERIFY_RETRY_MS = 1_000` in `runner.ts`), so a hive started from the console shows at once instead of reading "not verified".
+- fix: no Linux-only process probe off Linux (macOS, Windows), and the probe timers are cleared when the session ends.
+- fix: autopilot's kill flag can be cleared on Windows. Starting autopilot on Windows is refused with a plain message until a follow-up: its journal needs atomic appends and its folder fence needs Windows-aware path checks. Stop works as before.
+- fix: disk writes (settings, journal, envelope, exports) work on Windows through the host's file API (`$.fs.write` / `$.fs.exists`); Linux and macOS keep their exact commands.
+- fix: the home folder is found on Windows via `USERPROFILE` or `HOMEDRIVE` + `HOMEPATH`, so sessions, plugin health and What's new read it.
+- fix: Windows project folders (`C:\work\app`, `\\server\share\app`) and UNC shares are recognised across the remaining sites (plugin catalog, workflow drill I/O, event export, ADR discovery, workflow file resolution); protected autopilot folders match ignoring case.
+
+## 0.45.0 — 2026-10-23
+- feat: a **ruRE** page in the TOOLS group (ADR-494): static reverse engineering of a file in your project through the six `rure_*` tools — a JS/Electron app (APP MAP, FIND FEATURE, UNPACK .ASAR), a native binary (ELF, PE, Mach-O), a .NET assembly and EVM bytecode. The tools parse and never run the file. Five rows are `$0` reads that run at once; UNPACK .ASAR writes to a temp folder and asks first. The file is named by a new *sample* field that takes only a path inside the project. Every row is a palette id (`/ruflo run dt-re-bin <path>`). Names and strings from the analyzed file are shown cleaned, so a hostile binary cannot put a terminal escape on the screen. On a ruflo CLI without the tools (3.59.17 and older) the rows say to update.
+- chore: Enter in a field on a page of its own can run that page’s row (the ruRE page); the same `query` field on the Plugins page still runs the plugin search. The boot specs now derive the finish time from the number of areas instead of a fixed 5.4 s.
+
+## 0.44.7 — 2026-10-21
+- fix: the ADRs page, the Events/Timeline export and the AI terminal's "save transcript" now work on Windows (#4356, thanks @marioja). All three hardcoded a leading-`/` check as their "is the project folder known" guard; on Windows `state.cwd` is a drive path (`C:\Users\...`), so every one of them refused with "no project folder is known" regardless of settings. They now use the existing `isAbsolutePath` helper (already fixed for register.ts in #4175). Also fixed a second, independent bug on the transcript-save path: it pre-joined `state.cwd` into the string handed to `resolveExportPath`, which refuses any backslash in its input — so even after the first fix, a Windows transcript save still failed; it now passes the relative file name only, same as the Events/Timeline export already did.
+
+## 0.44.6 — 2026-10-20
+- feat: the compact nav's menu, groups, search and page tabs are now separated by a dim `│` bar instead of just a gap, so a row of chips and tabs reads as distinct items rather than running together (#3664).
+
+## 0.44.5 — 2026-10-20
+- fix: the standalone terminal console (`npx ruflo tui`) now shows a one-line notice on the first frame when mouse support is off (it's opt-in by design) and how to turn it on with `--mouse`, instead of clicking silently doing nothing (#4305).
+- fix: the footer's `0 menu` key hint no longer disappears below 80 columns (a common tmux/editor-pane width) — a new footer tier keeps it visible down to 62 columns (#4305).
+- fix: with `--mouse` on, a press-and-release pair delivered in a single terminal data chunk (as tmux can) is no longer dropped — `onMouse` now scans for every mouse report in the chunk instead of requiring the whole chunk to match one (#4305).
+
+## 0.44.4 — 2026-10-18
+- fix: the mission ledger is kept per project (#4237, #4242, thanks @kevin9327). One machine-wide key let the active mission of one project show in, and go into the prompt of, every other project, and two sessions in different projects overwrote each other. Each project now has its own key, and a new mission records the project it was made in. This shipped in 3.57.0 under the same 0.44.3 version, so `claude plugin update` never offered it.
+- fix: missions from before per-project storage no longer leak into every project (#4254). The old shared key's missions with no project recorded were still taken into each project that opened, and saved into its own key. Now Mission Control offers them ("N missions from before per-project storage"), each on its own row with adopt and not here, because the old key mixes missions from several projects; with two or more, one button turns them all away. Adopt records the project on that mission and takes it out of the old key, and only once the project's own save has succeeded; a mission older than the 20 a project keeps is not adopted rather than dropped. Not here keeps that mission's offer away there. An offer that came from the project's own key (a 0.44.3 copy) stays in that key until adopted, so a save no longer drops it. A mission the old key records for this project is taken in and removed from it without asking, again only after the save. A session that starts again in another directory begins with none of the last project's missions, goal or plan. Until every Claude Code session on the machine runs 0.44.4, a session still on 0.44.2 or 0.44.3 can write its in-memory missions back to the old shared key or a project's key, bringing back offers this version pruned. Restart those sessions after updating.
+
+## 0.44.3 — 2026-10-15
+- fix: the rest of Mission Control's prose wraps at 80 columns (tmux) instead of ending in "…" (#3899): a launch step's detail (Claude's guidance note, the screen verdict, the next task's title) moves onto wrapped rows under its step when it does not fit beside it, and the "Create the mission and its tasks" label no longer runs into its detail; on the record, the expanded mission's state, plan, evidence, executor and blocked-reason lines, the stale and attention notes, the legend and the observation note wrap; the Mission options "not offered by this session" hint wraps.
+
+## 0.44.2 — 2026-10-14
+- fix: the console reads the project on Windows (#4175, thanks @GangOn0215). Every path under the working directory came out as `C:\dev\app/C:\dev\app/.claude-flow/...` (the working directory prefixed twice, because the host wrapper counted only a leading `/` as absolute), so every read failed with ENOENT, the project showed as "Unregistered" and the pane never opened on its own. A drive path (`C:\x` or `C:/x`) and a UNC share (`\\server\share`) now count as absolute (`hooks/data/abs-path.ts`). Tested on win32-style paths only: no Windows machine was available to run the pane. The same leading-`/` test still guards a few other spots (ADR folder, event export, workflow file, mission cost, plugin catalog); those refuse Windows paths rather than misplace them, and are left to the Windows work in #4036.
+
+## 0.44.1 — 2026-10-14
+- feat: `ruflo tui` Stages B and C: every console view in the terminal with its actions, pinned panes and a parity check against the console (#4188)
+
+## 0.44.0 — 2026-10-14
+- feat: `ruflo tui` draws what the console draws. The pictures of the pages (the Classic BBS block-letter titles, the Orbital masthead with its globe, the swarm topology, gauges and charts) are drawn as coloured cells through a terminal Raster, 24-bit where the terminal says so and the nearest of 256 otherwise, and as the words they fall back to with NO_COLOR, a dumb terminal, `--no-pictures` or fewer than 44 columns. Every glyph is a code point that goes through the same sanitiser as the text: a control, invisible or wide one becomes a space
+- feat: the looks of the console in the terminal: Classic BBS (the default, as in the console), Orbital and plain; `--look` picks one and the `t` key steps through them; `--boot` plays the look's start-up screen first
+- feat: pictures move at `--fps` (0-30, default 8, the console's own default; 0 and `--no-anim` draw them still). An animation tick rewrites only the rows that changed, nothing is drawn while the terminal reports it is behind another window, and a slow terminal skips frames rather than queueing them
+- fix: `ruflo tui --plain` prints the plain look, so a script's frame has the same words as before
+
+## 0.43.7 — 2026-10-14
+- fix: Mission Control's prose wraps on word breaks instead of ending in "…" at 80 columns (tmux): the kind description, the empty-goal hint, the lifecycle line and each planned task line (#3899, the rest of what 0.40.2 did for Approvals and a mission's objective).
+
+## 0.43.6 — 2026-10-14
+- fix: the analyze page describes REVIEWERS as reviewer roles suggested from file paths and risk, not people from the history (#4163, thanks @rudycelekli)
+
 ## 0.43.5 — 2026-10-12
 - fix: the Skills page runs a pinned skills CLI (`skills@1.7.2`, like the AI page's pinned Codex) instead of whatever npm `latest` is: `npx -y skills` fetched and ran the newest release on every visit to the page (it lists on open) and on every add, remove, update, init and use, with the person's permissions. The hints name the pin from one constant. The pin fixes the top-level package only: its own dependencies (tar, yaml) are npm ranges resolved on the first fetch, and the first run needs the network. 1.7.2 is published by vercel-labs/skills with no install-time scripts (#4113, thanks @martinvlad)
 

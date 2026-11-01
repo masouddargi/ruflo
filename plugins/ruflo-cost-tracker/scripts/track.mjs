@@ -24,17 +24,9 @@ import { spawnNpxSync } from './_npx.mjs';
 import { logFailure } from './_diagnostic-log.cjs';
 // iter 68 — shared PRICING table (was duplicated in counterfactual.mjs too).
 import { modelTier, costForUsage } from './_prices.mjs';
+import { encodeProjectPath } from './_encode-project-path.mjs';
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects');
-
-function encodeProjectPath(cwd) {
-  // #1927: Claude Code encodes an absolute path by replacing path separators
-  // AND the Windows drive colon with `-`. So:
-  //   POSIX:   /home/user/proj      -> -home-user-proj
-  //   Windows: D:\project\Subcloudy -> D--project-Subcloudy   (`:` -> `-`, `\` -> `-`)
-  // The old code only replaced `/`, a no-op on Windows paths.
-  return cwd.replace(/[/\\:]/g, '-');
-}
 
 function findProjectDir(cwd) {
   const candidate = join(PROJECTS_DIR, encodeProjectPath(cwd));
@@ -114,7 +106,12 @@ function persistToMemory(summary) {
     '--namespace', ns,
     '--key', key,
     '--value', JSON.stringify(summary),
-  ], { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', shell: process.platform === 'win32' });
+  ], {
+    // #4397: land the row in the store the MCP server uses (CLAUDE_FLOW_CWD),
+    // not in whatever project dir the Stop hook happened to fire from.
+    cwd: process.env.CLAUDE_FLOW_CWD || process.cwd(),
+    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', shell: process.platform === 'win32',
+  });
   if (r.status !== 0) {
     return { ok: false, reason: r.stderr?.slice(0, 300) || `exit ${r.status}` };
   }

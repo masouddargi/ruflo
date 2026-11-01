@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from 'url';
 import { createHash } from 'crypto';
 import { ownInstallAncestors } from '../plugins/own-install.js';
 import { checkNativeAddonHeaders } from './doctor-native-addon.js';
+import { checkProjectAutoApproveSettings } from './doctor-auto-approve.js';
 import { execSync, exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import { decodeKey, isEncryptionEnabled } from '../encryption/vault.js';
@@ -2389,6 +2390,25 @@ async function checkMods(): Promise<HealthCheck> {
     : { name: 'ruflo mods (ADR-404)', status: 'warn', message: warnings.map((f) => `${f.name}: ${f.message}`).join('; '), fix: 'ruflo mods doctor' };
 }
 
+// ADR-510: do ruflo mods run under `claude -p --plugin-dir` here? Spawns a
+// real (cheap) model call, so `--component headless-plugins` only.
+async function checkHeadlessPlugins(): Promise<HealthCheck> {
+  const { checkHeadlessPlugins: run } = await import('../mods/headless-check.js');
+  return run();
+}
+
+// #4581 / ADR-502: ruflo-mods learning loop — is it recording, and do its verified outcomes reach SONA? Warn-only.
+async function checkLearningLoop(): Promise<HealthCheck> {
+  const { learningLoopHealth } = await import('../memory/verified-outcomes.js');
+  return { name: 'Learning loop (#4581)', ...learningLoopHealth(process.cwd()) };
+}
+
+// ADR-505: ruflo-mods compaction snapshots hold conversation text; warn when they exist and git does not ignore them.
+async function checkCompactSnapshots(): Promise<HealthCheck> {
+  const { compactSnapshotHealth } = await import('../mods/compact-snapshots.js');
+  return { name: 'Compaction snapshots (ADR-505)', ...compactSnapshotHealth(process.cwd()) };
+}
+
 // Opt-in @ruvector/typesafe task router (optional peer). `--component typesafe` only.
 async function checkTypesafeRouter(): Promise<HealthCheck> {
   const name = '@ruvector/typesafe router';
@@ -2579,6 +2599,12 @@ export const doctorCommand: Command = {
   description: 'System diagnostics and health checks',
   options: [
     {
+      name: 'json',
+      description: 'Emit versioned JSON health checks (cannot be combined with repair flags)',
+      type: 'boolean',
+      default: false
+    },
+    {
       name: 'fix',
       short: 'f',
       // #1791.5 — flag name was misleading: it does NOT auto-apply fixes,
@@ -2598,7 +2624,7 @@ export const doctorCommand: Command = {
     {
       name: 'component',
       short: 'c',
-      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, mcp-overhead, claude, browser, disk, typescript, agentic-flow, encryption, federation, funnel, proxy, auth, typesafe, mods, metaharness)',
+      description: 'Check specific component (version, node, npm, config, daemon, memory, api, git, mcp, mcp-overhead, claude, browser, disk, typescript, agentic-flow, encryption, federation, funnel, proxy, auth, typesafe, mods, headless-plugins, metaharness)',
       type: 'string'
     },
     {
@@ -2624,6 +2650,7 @@ export const doctorCommand: Command = {
     }
   ],
   examples: [
+    { command: 'claude-flow doctor --json -c node', description: 'Emit machine-readable health checks' },
     { command: 'claude-flow doctor', description: 'Run full health check' },
     { command: 'claude-flow doctor --fix', description: 'Print suggested fix commands (does not auto-apply)' },
     { command: 'claude-flow doctor --install', description: 'Auto-install missing dependencies' },
@@ -2638,6 +2665,20 @@ export const doctorCommand: Command = {
     const verbose = ctx.flags.verbose as boolean;
     // Parser camelCases kebab-case flag names — read via `fixHandles`, not `['fix-handles']`.
     const fixHandles = ctx.flags.fixHandles as boolean;
+    const json = ctx.flags.json as boolean;
+    const reportError = (message: string): CommandResult => {
+      if (json) output.writeln(JSON.stringify({ schemaVersion: 1, checks: [], error: message }));
+      else output.printError(message);
+      return { success: false, exitCode: 1, message };
+    };
+    if (json && (showFix || autoInstall || fixHandles)) {
+      return reportError('--json cannot be combined with --fix, --install, or --fix-handles');
+    }
+
+    // Reuse the same callable for anonymous checks so their IDs do not depend
+    // on display names or on whether the full or component suite was selected.
+    const helperCheck = () => checkHelperIntegrity();
+    const nativeAddonCheck = () => checkNativeAddonHeaders();
 
     // #2677: `--component memory` now runs the whole memory-health suite,
     // not just the existence check. Values can be a single check or an
@@ -2656,7 +2697,8 @@ export const doctorCommand: Command = {
       'browser': checkAgentBrowserVersion,
       'config': checkConfigFile,
       'stale-settings': checkStaleSettingsNpx, // #2448
-      'helpers': () => checkHelperIntegrity(), // #3565
+      'auto-approve': () => checkProjectAutoApproveSettings(), // ADR-509
+      'helpers': helperCheck, // #3565
       'daemon': checkDaemonStatus,
       get memory() { return [
         checkMemoryDatabase,         // existing: exists + statable (unchanged)
@@ -2670,7 +2712,7 @@ export const doctorCommand: Command = {
         checkMemoryCritiqueCoverage,  // #2677 check 6: feedback carries lessons
       ]; },
       'memory-package': checkMemoryPackageVersion, // #3392
-      'native-addon': () => checkNativeAddonHeaders(), // #4055
+      'native-addon': nativeAddonCheck, // #4055
       'learning': checkLearningBridge, // #2545
       'learning-bridge': checkLearningBridge, // #2545
       'api': checkApiKeys,
@@ -2693,12 +2735,14 @@ export const doctorCommand: Command = {
       'auth': checkAuth, // ADR-306
       'typesafe': checkTypesafeRouter, // opt-in @ruvector/typesafe task router
       'mods': checkMods, // ADR-404 — ruflo as a Claude Code mod
+      'learning-loop': checkLearningLoop, // #4581 — verified-outcome learning loop
+      'compact-snapshots': checkCompactSnapshots, // ADR-505 — snapshots must be gitignored
+      'headless-plugins': checkHeadlessPlugins, // ADR-510 — mods under claude -p (spawns claude; not in bare doctor)
     };
 
     if (component !== undefined && !Object.hasOwn(componentMap, component)) {
       const message = `Unknown doctor component: ${JSON.stringify(component)}. Valid components: ${Object.keys(componentMap).join(', ')}`;
-      output.printError(message);
-      return { success: false, exitCode: 1, message };
+      return reportError(message);
     }
 
     // Early-return short-circuit: `--fix-handles` is a targeted mitigation, not
@@ -2769,13 +2813,16 @@ export const doctorCommand: Command = {
       return { success: true };
     }
 
-    output.writeln();
-    output.writeln(output.bold('RuFlo Doctor'));
-    output.writeln(output.dim('System diagnostics and health check'));
-    output.writeln(output.dim('─'.repeat(50)));
-    output.writeln();
+    if (!json) {
+      output.writeln();
+      output.writeln(output.bold('RuFlo Doctor'));
+      output.writeln(output.dim('System diagnostics and health check'));
+      output.writeln(output.dim('─'.repeat(50)));
+      output.writeln();
+    }
 
-    const nativeAgentDbChecks = (await existingNativeAgentDbPaths())
+    const nativeAgentDbPaths = await existingNativeAgentDbPaths();
+    const nativeAgentDbChecks = nativeAgentDbPaths
       .map((dbPath) => () => checkNativeAgentDbStructuralIntegrity(dbPath));
 
     const allChecks: (() => Promise<HealthCheck>)[] = [
@@ -2788,7 +2835,8 @@ export const doctorCommand: Command = {
       checkGitRepo,
       checkConfigFile,
       checkStaleSettingsNpx, // #2448/#2677 — runaway `npx @latest` in settings
-      () => checkHelperIntegrity(), // #3565 — installed signed helpers vs manifest
+      () => checkProjectAutoApproveSettings(), // ADR-509 — project auto-approve keys
+      helperCheck, // #3565 — installed signed helpers vs manifest
       checkDaemonStatus,
       checkMemoryDatabase,
       checkMemoryStructuralIntegrity, // #2737 — bounded, native quick_check on every default run
@@ -2796,7 +2844,7 @@ export const doctorCommand: Command = {
       checkMemoryPersistenceDriver, // #2968/#3321 — read-only native capability probe
       checkLearningBridge, // #2545 — can the auto-memory hook actually load @claude-flow/memory?
       checkMemoryPackageVersion, // #3392 — loaded @claude-flow/memory must satisfy the CLI's declared range
-      () => checkNativeAddonHeaders(), // #4055 — better-sqlite3 built against Node 24.19+ headers on 24.19-24.21
+      nativeAddonCheck, // #4055 — better-sqlite3 built against Node 24.19+ headers on 24.19-24.21
       checkApiKeys,
       checkMcpServers,
       checkMcpSchemaOverhead, // #2726 — fixed tools/list prompt cost
@@ -2813,6 +2861,8 @@ export const doctorCommand: Command = {
       checkProxySponsoredConsent, // ADR-313 — Meta LLM Proxy sponsored-downtime health
       checkAuth, // ADR-306 — Cognitum identity (warn-only; never fails bare `ruflo doctor`)
       checkMods, // ADR-404 — Claude Code mod path (warn-only)
+      checkLearningLoop, // #4581 — verified outcomes reach SONA (warn-only)
+      checkCompactSnapshots, // ADR-505 — compaction snapshots gitignored (warn-only)
     ];
 
     let checksToRun = allChecks;
@@ -2821,24 +2871,64 @@ export const doctorCommand: Command = {
       checksToRun = Array.isArray(entry) ? entry : [entry];
     }
 
+    // These are API identifiers: keep them stable even when user-facing names
+    // change. Grouped components have a distinct ID for each individual check.
+    const checkIds = new Map<() => Promise<HealthCheck>, string>([
+      [checkVersionFreshness, 'version'], [checkNodeVersion, 'node'],
+      [checkNpmVersion, 'npm'], [checkClaudeCode, 'claude'],
+      [checkAgentBrowserVersion, 'browser'], [checkGit, 'git'],
+      [checkGitRepo, 'git-repo'], [checkConfigFile, 'config'],
+      [checkStaleSettingsNpx, 'stale-settings'], [() => checkProjectAutoApproveSettings(), 'auto-approve'], [helperCheck, 'helpers'],
+      [checkDaemonStatus, 'daemon'], [checkMemoryDatabase, 'memory-presence'],
+      [checkMemoryStructuralIntegrity, 'memory-structural'],
+      [checkMemoryIntegrity, 'memory-integrity'],
+      [checkMemoryPersistenceDriver, 'memory-driver'],
+      [checkMemoryPackageVersion, 'memory-package'],
+      [checkMemoryContent, 'memory-content'],
+      [checkMemoryEmbeddingCoverage, 'memory-embeddings'],
+      [checkMemoryReflexionCoverage, 'memory-reflexion'],
+      [checkMemoryCritiqueCoverage, 'memory-critique'],
+      [checkLearningBridge, 'learning'], [nativeAddonCheck, 'native-addon'],
+      [checkApiKeys, 'api'], [checkMcpServers, 'mcp'],
+      [checkMcpSchemaOverhead, 'mcp-overhead'], [checkAIDefence, 'aidefence'],
+      [checkDiskSpace, 'disk'], [checkBuildTools, 'typescript'],
+      [checkAgenticFlow, 'agentic-flow'], [checkEncryptionAtRest, 'encryption'],
+      [checkFederationBreaker, 'federation'], [checkMetaharness, 'metaharness'],
+      [checkMetaharnessDeclaredPackages, 'metaharness-packages'],
+      [checkMetaharnessIntegration, 'metaharness-integration'],
+      [checkFunnel, 'funnel'], [checkProxySponsoredConsent, 'proxy-consent'],
+      [checkProxyBinary, 'proxy-binary'], [checkProxyProcess, 'proxy-process'],
+      [checkProxyBindAddress, 'proxy-bind'], [checkAuth, 'auth'],
+      [checkTypesafeRouter, 'typesafe'], [checkMods, 'mods'],
+      [checkLearningLoop, 'learning-loop'], [checkHeadlessPlugins, 'headless-plugins'],
+      [checkCompactSnapshots, 'compact-snapshots'],
+    ]);
+    nativeAgentDbChecks.forEach((check, index) => {
+      // The path distinguishes simultaneous authority files; normalize separators.
+      checkIds.set(check, `memory-native:${nativeAgentDbPaths[index].replace(/\\/g, '/')}`);
+    });
+    if (json && checksToRun.some(check => !checkIds.has(check))) {
+      return reportError('Doctor check is missing a stable JSON ID');
+    }
+
     const results: HealthCheck[] = [];
     const fixes: string[] = [];
 
     // OPTIMIZATION: Run all checks in parallel for 3-5x faster execution
-    const spinner = output.createSpinner({ text: 'Running health checks in parallel...', spinner: 'dots' });
-    spinner.start();
+    const spinner = json ? undefined : output.createSpinner({ text: 'Running health checks in parallel...', spinner: 'dots' });
+    spinner?.start();
 
     try {
       // Execute all checks concurrently
       const checkResults = await Promise.allSettled(checksToRun.map(check => check()));
-      spinner.stop();
+      spinner?.stop();
 
       // Process results in order
       for (const settledResult of checkResults) {
         if (settledResult.status === 'fulfilled') {
           const result = settledResult.value;
           results.push(result);
-          output.writeln(formatCheck(result));
+          if (!json) output.writeln(formatCheck(result));
 
           if (result.fix && (result.status === 'fail' || result.status === 'warn')) {
             fixes.push(`${result.name}: ${result.fix}`);
@@ -2850,11 +2940,12 @@ export const doctorCommand: Command = {
             message: settledResult.reason?.message || 'Unknown error'
           };
           results.push(errorResult);
-          output.writeln(formatCheck(errorResult));
+          if (!json) output.writeln(formatCheck(errorResult));
         }
       }
     } catch (error) {
-      spinner.stop();
+      spinner?.stop();
+      if (json) return reportError(`Failed to run health checks: ${error instanceof Error ? error.message : String(error)}`);
       output.writeln(output.error('Failed to run health checks'));
     }
 
@@ -2904,6 +2995,19 @@ export const doctorCommand: Command = {
     const passed = results.filter(r => r.status === 'pass').length;
     const warnings = results.filter(r => r.status === 'warn').length;
     const failed = results.filter(r => r.status === 'fail').length;
+
+    if (json) {
+      const checks = results.map((result, index) => ({
+        id: checkIds.get(checksToRun[index])!,
+        status: result.status,
+        name: result.name,
+        detail: result.message,
+        ...(result.fix ? { fix: result.fix } : {}),
+      }));
+      const data = { schemaVersion: 1, checks };
+      output.writeln(JSON.stringify(data));
+      return { success: failed === 0, exitCode: failed > 0 ? 1 : 0, data };
+    }
 
     output.writeln();
     output.writeln(output.dim('─'.repeat(50)));

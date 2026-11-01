@@ -1,6 +1,6 @@
 ---
 name: create-mod
-description: Scaffold a Claude Code mod (a plugin with a function-hooks module) from ruflo's governed template — hybrid hooks.json with a classic fallback, a host adapter over literal $ calls, userConfig options, engine-kit tests and a tsconfig — then validate and test it. Use when the user asks for a mod, a function hook, or wants Claude Code to modify itself.
+description: Scaffold a Claude Code mod (a plugin with a function-hooks module) from ruflo's governed template, then validate and test it. Use when the user asks for a mod, a function hook, or wants Claude Code to modify itself.
 argument-hint: "<mod-name>"
 allowed-tools: Bash Read Write Edit
 ---
@@ -30,4 +30,4 @@ Scaffold a mod the governed way, instead of an ad-hoc one: the template already 
    claude -p --plugin-dir <dir> "/<name>-status"   # writes .claude-plugin/types/ and proves a live load
    npx tsc -p <dir>                  # against those generated types
    ```
-8. **Ship it in a plugin marketplace** (`marketplace.json` entry), installed with `/plugin install <name>@<marketplace>` and picked up with `/reload-plugins`. If ruflo-mods is installed with `modTrust: refuse-risky`, a mod using `process.run`, `http.fetch`, `env.set` or `fs.write`, or hooking `tool.check`/`tool.call`/`*`, is refused unless its plugin id (`<name>@<marketplace>`) is in `modTrustAllow` — the template sets `env.set` (the fallback handshake), so allow-list it by id.
+8. **Ship it in a plugin marketplace** (`marketplace.json` entry), installed with `/plugin install <name>@<marketplace>` and picked up with `/reload-plugins`. If ruflo-mods is installed with `modTrust: refuse-risky`, a mod using `process.run`/`process.spawn`, `http.fetch`, `mcp.call`/`mcp.connect`, `session.send`, `config.set`, `env.set`, `fs.write`, `agent.spawn`/`agent.register`, `prompt.submit`, `session.append`, `tool.call` or `command.run`, or hooking any event in its `RISKY_EVENTS` (`tool.check`, `tool.call`, `prompt.*`, `agent.spawn`, `tool.describe`, `session.append`, `session.receive`, `turn.step`, `skill.prompt`, `session.compact`, `prompt.edit`, `fs.read`/`fs.stat`/`fs.exists`/`fs.list`, `settings.read`, `env.get`, a hook on any of the calls above (it can rewrite another mod's call), `plugin.register`, `classic.*`, `*`; a glob or a `!` negation is judged by what it selects), is refused unless its plugin id (`<name>@<marketplace>`) is in `modTrustAllow` — the template sets `env.set` (the fallback handshake), so allow-list it by id.

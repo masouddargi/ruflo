@@ -19,6 +19,7 @@ Two files carry the number 430 (the menu's accents, and the menu-design amendmen
 | 452 | Mod-system overnight hardening: findings, changes, open items | Accepted (record) | 10-05 | 404, 444, 445, 446, 450, 451 | — | #3735; records #3706, #3711, #3713, #3714, #3715, #3717, #3719, #3727, #3732, #3733, #3734 (all merged) | no code of its own | `probe-mod-guards`, `sync-mod-screen --check` |
 | 453 | Project Anatole: an optional, learning watchdog for unattended agents | Proposed | 10-05 | 404, 444, 445, 446, 450, 451, 452; related 449 | — | this PR (ADR only) | not built | — |
 | 491 | ruflo-mods across Claude Code and Codex: a host-neutral core and a thin Codex adapter | Proposed | 10-11 | 404, 406, 444, 447, 451, 488, 490; related 489 | — | this PR (ADR only) | not built; evidence table measured by ADR-490's loop | `scripts/e2e/leg-codex.mjs` policy probes |
+| 494 | ruRE in the ruflo console: a TOOLS page for static reverse engineering | Accepted | 10-23 | 442, 480; related 489 | — | this PR | ruflo-console 0.45.0 (the `rure_*` tools are in `main` after 3.59.17) | `tests/rure-page.spec.ts`, `tests/rure-e2e.spec.ts` (real CLI) |
 
 ## Console: mission control and Claude control
 
@@ -69,6 +70,7 @@ Two files carry the number 430 (the menu's accents, and the menu-design amendmen
 | 478 | Console What's new page, plugin changelogs | Accepted | 10-07 | 428, 477 | — | — | [ADR-478](ADR-478-console-whats-new.md) | — |
 | 480 | Console ADRs page: your project's ADRs, and missions, loops and swarms that follow them | Accepted | 10-07 | 407, 443, 444, 450, 474, 477, 478 | — | this PR | console 0.39.0, swarm 0.3.5, workflows 0.6.4 | `adr.spec`, `adr-write.spec`, `adr-integration.spec`, `adr-page.spec`, `adr-mutation.spec`, `adr-digest.spec` |
 | 483 | Console advisor checkpoints for mission loops (plan, repeated failure, before done) | Accepted | 10-08 | 441, 443, 444, 477, 480, 481 | — | this PR | console 0.40.0 | `mission-advisor.spec`, `mission-advisor-mutation.spec` |
+| 484 | External plugins in the ruflo marketplace (first: Agentic QE) | Accepted | 10-09 | 446, 434, 411 | — | this PR | next console release | `plugin-catalog.spec`, `plugin-coverage.spec`, `smoke-all-plugins` external step |
 | 486 | Session workspace: attention queue, session browser and preview on the Room (Claude, Codex and Ruflo sessions) | Accepted | 10-09 | 406, 444, 448, 473, 477, 481 | — | this PR | console 0.41.0, mods 0.4.0 | `sessions.spec`, `sessions-safety.spec`, `sessions-real-fs.spec`, `attention.test` |
 
 Other ADRs outside 404-451 that the mod ADRs lean on: 150 (removable integrations), 174 (failures as a learning signal), 322 and 322A/B/C (flywheel, evaluation and promotion, receipts), 324 and 325 (policy engine, claims plane), 103 (witness). The console's Mods section (`hooks/data/mods.ts`, console 0.33.1, PR #3707) reads the status files ADR 446 defines.

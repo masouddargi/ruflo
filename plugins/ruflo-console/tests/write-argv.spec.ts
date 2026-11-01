@@ -7,7 +7,7 @@
  *   npx vitest run plugins/ruflo-console/tests/write-argv.spec.ts --testTimeout=30000
  */
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, lstatSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -55,11 +55,12 @@ describe('which flavor, and when', () => {
     expect(asked).toEqual([['uname', '-s']])
   })
 
-  it('without an answer, the engine platform decides: darwin and the BSDs posix, everything else gnu', () => {
+  it('without an answer, the engine platform decides: darwin and the BSDs posix, Windows host-fs, everything else gnu', () => {
     for (const platform of ['darwin', 'freebsd', 'openbsd', 'netbsd']) expect(flavorOfPlatform(platform), platform).toBe('posix')
-    for (const platform of ['linux', 'win32', 'aix', null, 42]) expect(flavorOfPlatform(platform), String(platform)).toBe('gnu')
+    for (const platform of ['linux', 'aix', null, 42]) expect(flavorOfPlatform(platform), String(platform)).toBe('gnu')
+    expect(flavorOfPlatform('win32')).toBe('host-fs')
     // In this test process the default reads Node's own process.platform.
-    expect(flavorOfPlatform()).toBe(process.platform === 'darwin' || process.platform.endsWith('bsd') ? 'posix' : 'gnu')
+    expect(flavorOfPlatform()).toBe(process.platform === 'win32' ? 'host-fs' : process.platform === 'darwin' || process.platform.endsWith('bsd') ? 'posix' : 'gnu')
   })
 
   it.each([
@@ -185,7 +186,8 @@ describe('the POSIX argv (macOS, BSD): a fixed set of constant scripts, the path
   })
 })
 
-describe('the POSIX scripts on a real disk (sh and dd as this machine has them)', () => {
+// Windows writes through the host file API (host-fs), never these scripts; NTFS has no mode bits or FIFOs to check them against.
+describe.skipIf(process.platform === 'win32')('the POSIX scripts on a real disk (sh and dd as this machine has them)', () => {
   let dir = ''
 
   afterEach(() => {
@@ -330,6 +332,7 @@ describe('the POSIX scripts on a real disk (sh and dd as this machine has them)'
     const victim = join(dir, 'victim')
 
     writeFileSync(victim, 'precious', { mode: 0o644 })
+    chmodSync(victim, 0o644) // writeFileSync's mode is subject to the process umask; force it so this assertion isn't host-dependent.
     symlinkSync(victim, join(dir, 'link-flag'))
     expect(run(touchArgv(join(dir, 'link-flag'), 'posix')).status).toBe(73)
     expect(readFileSync(victim, 'utf8')).toBe('precious')

@@ -3,10 +3,11 @@
  * Codex. Every send waits for a card that was drawn; a key is read by name and never reaches a frame; the reply's cost is the provider's.
  *   npx vitest run plugins/ruflo-console/tests/tui-ai-page.spec.ts
  */
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { widthOf } from '../tui/ansi'
 import { runTui, type TuiIO } from '../tui/run'
@@ -27,7 +28,7 @@ beforeAll(() => {
   mkdirSync(project, { recursive: true })
   mkdirSync(codexHome, { recursive: true })
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 beforeEach(() => void (process.env.OPENROUTER_API_KEY = KEY))
 afterEach(() => {
   delete process.env.OPENROUTER_API_KEY
@@ -39,7 +40,7 @@ const reply = (content: string, cost = 0.004) => ({ choices: [{ message: { conte
 
 function open(extra: { maxSpendUsd?: number; model?: string; body?: unknown; status?: number } = {}) {
   const fetchSpy = vi.fn(async (_url: unknown, _init?: unknown) => new Response(JSON.stringify(extra.body ?? reply('hello from the stub')), { status: extra.status ?? 200 }))
-  const session = openSession({ cwd: project, home: root, aiPage: { codexBin: FAKE, fetch: fetchSpy as never, ...(extra.maxSpendUsd !== undefined && { maxSpendUsd: extra.maxSpendUsd }), ...(extra.model !== undefined && { model: extra.model }) } })
+  const session = openSession({ look: 'plain', fps: 0, cwd: project, home: root, aiPage: { codexBin: FAKE, fetch: fetchSpy as never, ...(extra.maxSpendUsd !== undefined && { maxSpendUsd: extra.maxSpendUsd }), ...(extra.model !== undefined && { model: extra.model }) } })
 
   session.show('ai')
 
@@ -251,7 +252,7 @@ describe('Codex', () => {
   })
 
   it('without the pinned release the answer says so and nothing falls back to PATH or current', async () => {
-    const session = openSession({ cwd: project, home: join(root, 'no-codex-here'), aiPage: { fetch: vi.fn() as never } })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'no-codex-here'), aiPage: { fetch: vi.fn() as never } })
 
     session.show('ai')
 
@@ -304,12 +305,13 @@ describe('the page', () => {
     const out: string[] = []
     const io = (): TuiIO => ({ stdin: { on: () => undefined, off: () => undefined, resume: () => undefined, pause: () => undefined }, stdout: { columns: 100, rows: 30, write: text => void out.push(text) }, stderr: { write: () => undefined }, env: {} })
 
-    expect(await runTui({ cwd: project, home: root, plain: true, view: 'ai', aiPage: { codexBin: FAKE } }, io())).toBe(0)
-    expect(out.join('')).toMatch(/codex .*ready|codex .*pinned/)
+    expect(await runTui({ look: 'plain', fps: 0, cwd: project, home: root, plain: true, view: 'ai', aiPage: { codexBin: FAKE } }, io())).toBe(0)
+    // The fake codex is a script with a shebang, which Windows cannot run: there the page can only say it is not ready.
+    expect(out.join('')).toMatch(isWin ? /codex/ : /codex .*ready|codex .*pinned/)
     expect(out.join('')).toContain('openrouter')
     expect(out.join('')).not.toContain(KEY)
     out.length = 0
-    expect(await runTui({ cwd: project, home: root, plain: true, view: 'ai' }, io())).toBe(0)
+    expect(await runTui({ look: 'plain', fps: 0, cwd: project, home: root, plain: true, view: 'ai' }, io())).toBe(0)
     expect(out.join('')).toContain('The AI page is off')
   })
 })

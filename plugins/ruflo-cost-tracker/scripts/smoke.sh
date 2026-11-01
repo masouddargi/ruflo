@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Structural smoke test for ruflo-cost-tracker v0.28.2.
+# Structural smoke test for ruflo-cost-tracker v0.31.0.
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# `pwd -W` (Git Bash on Windows) gives C:/Users/...; plain pwd gives /c/Users/..., which a Windows node cannot open. Elsewhere -W fails and pwd answers.
+ROOT="$(cd "$(dirname "$0")/.." && { pwd -W 2>/dev/null || pwd; })"
 PASS=0
 FAIL=0
 step() { printf "→ %s ... " "$1"; }
 ok()   { printf "PASS\n"; PASS=$((PASS+1)); }
 bad()  { printf "FAIL: %s\n" "$1"; FAIL=$((FAIL+1)); }
 
-step "1. plugin.json declares 0.28.2 with new keywords"
+step "1. plugin.json declares 0.31.0 with new keywords"
 v=$(grep -E '"version"' "$ROOT/.claude-plugin/plugin.json" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-if [[ "$v" != "0.28.2" ]]; then
-  bad "expected 0.28.2, got '$v'"
+if [[ "$v" != "0.31.0" ]]; then
+  bad "expected 0.31.0, got '$v'"
 else
   miss=""
   for k in namespace-routing mcp agentic-flow agent-booster tier1-routing model-routing benchmarking verified telemetry budget projection forecast counterfactual drift-detection trend-alert anomaly-detection outlier-detection health-check composite-gate auto-track stop-hook snapshot-diff pr-regression git-context traceability drill-down per-message; do
@@ -277,7 +278,18 @@ LOOKED_LINE="$(printf '%s\n' "$TRACK_OUT_LINE" | grep 'looked under' || true)"
 miss=""
 printf '%s\n' "$LOOKED_LINE" | grep -q 'D--project-Subcloudy' || miss="$miss not-encoded"
 printf '%s\n' "$LOOKED_LINE" | grep -qF 'project\Subcloudy' && miss="$miss corrupt-encoded-path"
+
+# #4366: `_` and `.` are non-alphanumeric too. Claude Code encodes every one
+# to `-`; a path that only replaces separators/colon resolves no session and
+# makes the Stop hook silently persist nothing.
+TRACK_OUT_LINE2="$(TRACK_CWD='D:\project\my_project.v2' node "$ROOT/scripts/track.mjs" 2>&1 || true)"
+LOOKED_LINE2="$(printf '%s\n' "$TRACK_OUT_LINE2" | grep 'looked under' || true)"
+printf '%s\n' "$LOOKED_LINE2" | grep -q 'D--project-my-project-v2' || miss="$miss underscore-dot-not-encoded"
+printf '%s\n' "$LOOKED_LINE2" | grep -qF 'my_project.v2' && miss="$miss underscore-dot-left-literal"
 [[ -z "$miss" ]] && ok || bad "$miss"
+
+step "29c. encodeProjectPath unit cases (#4366)"
+if node "$ROOT/scripts/test-project-slug-4366.mjs"; then ok; else bad "slug cases failed"; fi
 
 step "30. ruflo-cost.md documents 'cost track' subcommand"
 F="$ROOT/commands/ruflo-cost.md"
@@ -670,6 +682,10 @@ grep -q -- '--yes' "$ROOT/scripts/openrouter.mjs" || miss="$miss openrouter-no-c
 step "46. #3227 diagnostic log: track.mjs / ruflo-hook.cjs failure logging"
 node "$ROOT/scripts/test-cost-tracker-diagnostic-log-3227.mjs" >/dev/null 2>&1 \
   && ok || bad "test-cost-tracker-diagnostic-log-3227-failed"
+
+step "47. #4397 track.mjs runs memory store in CLAUDE_FLOW_CWD"
+node "$ROOT/scripts/test-cost-tracker-data-cwd-4397.mjs" >/dev/null 2>&1 \
+  && ok || bad "test-cost-tracker-data-cwd-4397-failed"
 
 printf "\n%s passed, %s failed\n" "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1

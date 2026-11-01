@@ -3,10 +3,11 @@
  * host, drawn by the mod's own page bodies in the standalone pane, headless and with an injected terminal. Run with
  *   npx vitest run plugins/ruflo-console/tests/tui-session.spec.ts
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { removeTree } from './fixtures/rm-tree'
 
 import { depthOf, keyOf, NOT_A_TERMINAL_HINT, runTui, type TuiIO } from '../tui/run'
 import { openSession } from '../tui/session'
@@ -32,7 +33,7 @@ beforeAll(() => {
   // The same project with an escape sequence and a token where a swarm id and topology are read from disk (both files that name it).
   put(hostile, { ...RUFLO_FILES, '.swarm/state.json': JSON.stringify({ id: `swarm-\u001b]0;pwned\u0007-1`, topology: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', status: 'running' }), '.claude-flow/swarm/swarm-state.json': JSON.stringify({ swarms: { 'swarm-1': { swarmId: `swarm-\u001b]0;pwned\u0007-1`, topology: 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', status: 'running', agents: [] } } }) })
 })
-afterAll(() => rmSync(root, { recursive: true, force: true }))
+afterAll(() => removeTree(root))
 
 function fakeIO(isTTY: boolean) {
   const out: string[] = []
@@ -50,8 +51,22 @@ function fakeIO(isTTY: boolean) {
 }
 
 describe('the same views over real ruflo files', () => {
+  it('the config folder is <home>/.claude when CLAUDE_CONFIG_DIR is not given, so the plugin, marketplace and run reads have somewhere to look', async () => {
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
+
+    await session.refresh()
+    expect(session.state.configDir).toBe(`${join(root, 'home')}/.claude`)
+    session.stop()
+
+    const explicit = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home'), configDir: join(root, 'elsewhere') })
+
+    await explicit.refresh()
+    expect(explicit.state.configDir).toBe(join(root, 'elsewhere'))
+    explicit.stop()
+  })
+
   it('Overview shows the swarm, the daemon and the helpers read from disk', async () => {
-    const session = openSession({ cwd: project, home: join(root, 'home') })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
 
     await session.refresh()
     const text = session.frame(110, 'none').join('\n')
@@ -64,7 +79,7 @@ describe('the same views over real ruflo files', () => {
   })
 
   it('Cost shows its sections and says n/a for what only the Claude Code host can measure', async () => {
-    const session = openSession({ cwd: project, home: join(root, 'home') })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
 
     await session.refresh()
     session.show('cost')
@@ -77,7 +92,7 @@ describe('the same views over real ruflo files', () => {
   })
 
   it('is the mod\'s own tree: the standalone frame carries the same pane header the mod draws', async () => {
-    const session = openSession({ cwd: project, home: join(root, 'home') })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') })
 
     await session.refresh()
     expect(session.frame(110, 'none').join('\n')).toContain('what ruflo is doing here')
@@ -85,7 +100,7 @@ describe('the same views over real ruflo files', () => {
   })
 
   it('hostile ruflo files: no escape from content and no token reach the frame (the data layer refuses the id, the renderer strips the rest)', async () => {
-    const session = openSession({ cwd: hostile, home: join(root, 'home') })
+    const session = openSession({ look: 'plain', fps: 0, cwd: hostile, home: join(root, 'home') })
 
     await session.refresh()
     for (const depth of ['none', '256'] as const) {
@@ -103,9 +118,9 @@ describe('the same views over real ruflo files', () => {
     ['escapes only: the words stay, the sequences go', 'boom \u001b]0;pwned\u0007\u001b[2J\u009b31m end', /exit 1: .*boom.* end/],
     ['an escape and a token: the whole line is withheld', 'boom \u001b]0;pwned\u0007 ghp_abcdefghijklmnopqrstuvwxyz0123456789 end', /line withheld/],
   ])('what a failing child prints reaches the frame as clean text (stderr is not JSON, so no data layer in front): %s', async (_name, stderr, expected) => {
-    const base = openSession({ cwd: project, home: join(root, 'home') }).host
+    const base = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }).host
     const hostileRun = async () => ({ exitCode: 1, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false })
-    const session = openSession({ cwd: project }, { ...base, run: hostileRun })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project }, { ...base, run: hostileRun })
 
     await session.refresh()
     await session.refresh()
@@ -123,9 +138,9 @@ describe('the same views over real ruflo files', () => {
   it('never calls the engine: every host call the controller made was a read or a refusal', async () => {
     const ran: string[][] = []
     const calls: string[] = []
-    const base = openSession({ cwd: project, home: join(root, 'home') }).host
+    const base = openSession({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }).host
     const spy = new Proxy(base, { get: (target, key: string) => (typeof target[key as keyof typeof target] === 'function' ? (...args: never[]) => (calls.push(key), (target[key as keyof typeof target] as (...a: never[]) => unknown)(...args)) : target[key as keyof typeof target]) })
-    const session = openSession({ cwd: project }, { ...spy, run: async argv => (ran.push([...argv]), Promise.reject(new Error('no program'))) })
+    const session = openSession({ look: 'plain', fps: 0, cwd: project }, { ...spy, run: async argv => (ran.push([...argv]), Promise.reject(new Error('no program'))) })
 
     await session.refresh()
     expect(calls.filter(call => ['openPane', 'blit', 'toolCall', 'submitPrompt', 'spawn', 'askChoice'].includes(call))).toEqual([])
@@ -138,7 +153,7 @@ describe('the same views over real ruflo files', () => {
 describe('headless', () => {
   it('--plain prints one plain frame to stdout, nothing to stderr, and returns 0', async () => {
     const { io, out, err } = fakeIO(false)
-    const code = await runTui({ cwd: project, home: join(root, 'home'), plain: true }, io)
+    const code = await runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home'), plain: true }, io)
 
     expect(code).toBe(0)
     expect(out.join('')).toContain('swarm-1790903031804-y9rnjr')
@@ -149,13 +164,13 @@ describe('headless', () => {
   it('--plain opens the page asked for', async () => {
     const { io, out } = fakeIO(false)
 
-    await runTui({ cwd: project, home: join(root, 'home'), view: 'cost', plain: true }, io)
+    await runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home'), view: 'cost', plain: true }, io)
     expect(out.join('')).toContain('Where it goes')
   })
 
   it('--plain in a real terminal still prints one frame and never enters the alternate screen or raw mode', async () => {
     const { io, out, raw } = fakeIO(true)
-    const code = await runTui({ cwd: project, home: join(root, 'home'), plain: true }, io)
+    const code = await runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home'), plain: true }, io)
 
     expect(code).toBe(0)
     expect(out.join('')).toContain('swarm-1790903031804-y9rnjr')
@@ -165,7 +180,7 @@ describe('headless', () => {
 
   it('without a terminal and without --plain prints a one-line hint to stderr and returns 2, with nothing on stdout', async () => {
     const { io, out, err } = fakeIO(false)
-    const code = await runTui({ cwd: project, home: join(root, 'home') }, io)
+    const code = await runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }, io)
 
     expect(code).toBe(2)
     expect(out).toEqual([])
@@ -176,7 +191,7 @@ describe('headless', () => {
 
   it('a terminal that cannot do raw mode counts as no terminal', async () => {
     const { io, out, err } = fakeIO(true)
-    const code = await runTui({ cwd: project, home: join(root, 'home') }, { ...io, stdin: { ...io.stdin, setRawMode: undefined } })
+    const code = await runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }, { ...io, stdin: { ...io.stdin, setRawMode: undefined } })
 
     expect(code).toBe(2)
     expect(out).toEqual([])
@@ -187,7 +202,7 @@ describe('headless', () => {
 describe('interactive', () => {
   it('enters the alternate screen, switches page on a key, and restores the terminal on q', async () => {
     const { io, out, raw, press } = fakeIO(true)
-    const running = runTui({ cwd: project, home: join(root, 'home') }, io)
+    const running = runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }, io)
 
     await new Promise(resolve => setTimeout(resolve, 150))
     press('c')
@@ -207,7 +222,7 @@ describe('interactive', () => {
   it('restores the terminal when the signal aborts', async () => {
     const { io, out, raw } = fakeIO(true)
     const stop = new AbortController()
-    const running = runTui({ cwd: project, home: join(root, 'home') }, { ...io, signal: stop.signal })
+    const running = runTui({ look: 'plain', fps: 0, cwd: project, home: join(root, 'home') }, { ...io, signal: stop.signal })
 
     await new Promise(resolve => setTimeout(resolve, 100))
     stop.abort()
@@ -229,5 +244,14 @@ describe('keys and colour depth', () => {
     expect(depthOf({})).toBe('none')
     expect(depthOf({ TERM: 'xterm-256color' })).toBe('256')
     expect(depthOf({ TERM: 'xterm', COLORTERM: 'truecolor' })).toBe('truecolor')
+  })
+
+  it('keeps colour on Windows, where TERM is unset in Windows Terminal, PowerShell and cmd', () => {
+    expect(depthOf({ OS: 'Windows_NT' })).toBe('256')
+    expect(depthOf({ OS: 'Windows_NT', TERM: '' })).toBe('256')
+    expect(depthOf({ OS: 'Windows_NT', COLORTERM: 'truecolor' })).toBe('truecolor')
+    expect(depthOf({ OS: 'Windows_NT', TERM: 'dumb' })).toBe('none')
+    expect(depthOf({ OS: 'Windows_NT', NO_COLOR: '1', COLORTERM: 'truecolor' })).toBe('none')
+    expect(depthOf({ COLORTERM: 'truecolor' })).toBe('none')
   })
 })

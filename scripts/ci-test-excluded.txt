@@ -3,11 +3,14 @@
 #   - plugins/*/tests/*.test.ts import `claude-code/testing`, which only exists inside Claude Code: `claude plugin test <dir>` runs them
 #     (every plugin's scripts/smoke.sh, and .github/workflows/all-plugins-smoke.yml).
 #   - the .mjs files use node:test: `node --test` runs them (all-plugins-smoke.yml and the plugin smokes).
+#   - v3/@claude-flow/cli/__tests__/real-binary/*.test.ts need the real `claude` binary: `npm run test:real-binary` runs them
+#     (ADR-504; the mods-real-binary job in .github/workflows/mod-guidance.yml).
 # A listed file that no longer exists fails the ratchet, so this list cannot go stale silently. Never add a file here to make a real
 # regression green: a file that vitest CAN run belongs in scripts/ci-test-baseline.txt (and that file may only shrink).
 
 plugins/ruflo-adr/tests/mod.test.ts
 plugins/ruflo-agentdb/tests/fold.test.ts
+plugins/ruflo-agentdb/tests/guard-keys.test.ts
 plugins/ruflo-agentdb/tests/guard-scan.test.ts
 plugins/ruflo-agentdb/tests/import.test.ts
 plugins/ruflo-agentdb/tests/register.test.ts
@@ -80,8 +83,10 @@ tests/plugins/codex-mod-hooks.test.mjs
 tests/plugins/codex-swarm-hook-manifest.test.mjs
 scripts/__tests__/guard-label.test.mjs
 scripts/__tests__/mod-capability-matrix.test.mjs
+tests/all-plugins-smoke-workflow.test.mjs
 tests/check-guard-tool-names.test.mjs
 tests/check-status-forwarding.test.mjs
+tests/external-plugins.test.mjs
 plugins/ruflo-console/tests/result-display.test.ts
 plugins/ruflo-console/tests/toasts.test.ts
 plugins/ruflo-console/tests/full-text.test.ts
@@ -95,5 +100,14 @@ plugins/ruflo-swarm/tests/toast.test.ts
 plugins/ruflo-mods/tests/protector.test.ts
 plugins/ruflo-mods/tests/selfcheck.test.ts
 plugins/ruflo-testgen/scripts/tdd-repair/tdd-repair.test.mjs
+plugins/ruflo-business-pods/scripts/pod-tick.test.mjs
+plugins/ruflo-core/scripts/background-hooks.test.cjs
 plugins/ruflo-core/scripts/command-recording-switch.test.cjs
 tests/regression/oct12-coverage.test.cjs
+plugins/ruflo-adr/scripts/__tests__/adr-status-forms-4126.test.mjs
+scripts/__tests__/probe-mod-guards.test.mjs
+plugins/ruflo-core/scripts/witness/__tests__/witness-auth.test.mjs
+v3/@claude-flow/cli/__tests__/real-binary/classic-loop.test.ts
+v3/@claude-flow/cli/__tests__/real-binary/contracts.test.ts
+v3/@claude-flow/cli/__tests__/real-binary/external-plugins.test.ts
+v3/@claude-flow/cli/__tests__/real-binary/loads.test.ts

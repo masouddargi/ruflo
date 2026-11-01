@@ -6,7 +6,7 @@ import { feedbackPatternsSchema, validateFeedbackPatterns } from '../memory/feed
 
 import { mkdirSync, writeFileSync, existsSync, readFileSync, statSync, unlinkSync, readdirSync, rmSync } from 'fs';
 import * as nodeFs from 'fs';
-import { dirname, join, resolve } from 'path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { type MCPTool, getProjectCwd } from './types.js';
 import { validateIdentifier, validateText, validatePath } from './validate-input.js';
 import { commandRecordingDisabled, redactCommandForStorage } from '../services/command-recording.js';
@@ -1366,6 +1366,9 @@ export const hooksRoute: MCPTool = {
       // Q-learning and keyword suggestions retain their existing routing paths.
       try {
         const sonaStart = performance.now();
+        // #4581: fold in any verified outcomes the ruflo-mods learning loop
+        // recorded since the last call (one stat when nothing changed).
+        await ingestVerifiedQuietly();
         const sona = await getSONAOptimizer();
         const suggestion = await sona?.getRoutingSuggestion(task);
         const { isSupportedSonaAgent } = await import('../memory/sona-optimizer.js');
@@ -2425,7 +2428,13 @@ export const hooksBuildAgents: MCPTool = {
     },
   },
   handler: async (params: Record<string, unknown>) => {
-    const outputDir = resolve((params.outputDir as string) || './agents');
+    // #4558: outputDir was never validated and resolved against the process
+    // cwd, so a default call from another directory overwrote files there.
+    if (params.outputDir !== undefined) {
+      const v = validatePath(params.outputDir, 'outputDir');
+      if (!v.valid) return { success: false, error: v.error };
+    }
+    const outputDir = resolve(getProjectCwd(), (params.outputDir as string) || './agents');
     const focus = (params.focus as string) || 'all';
     const format = (params.format as string) || 'yaml';
     const persist = params.persist !== false; // Default to true
@@ -2475,9 +2484,11 @@ export const hooksBuildAgents: MCPTool = {
       agents: filteredAgents,
       stats: {
         configsGenerated: filteredAgents.length,
-        patternsApplied: filteredAgents.length * 3,
+        // #4558: was agents * 3; no pretrain data is read, the configs are templates.
+        patternsApplied: 0,
         optimizationsIncluded: filteredAgents.reduce((acc, a) => acc + a.optimizations.length, 0),
       },
+      _note: 'Configs are built-in templates; pretrain data is not read.',
     };
   },
 };
@@ -2836,9 +2847,12 @@ export const hooksSessionEnd: MCPTool = {
       }
     }
 
+    const verifiedOutcomes = await ingestVerifiedQuietly();
+
     return {
       sessionId,
       duration,
+      verifiedOutcomes,
       statePath: saveState ? `.claude/sessions/${sessionId}.json` : undefined,
       daemon: { stopped: daemonStopped },
       sessionPersistence: sessionPersistence || { controller: 'none', persisted: false },
@@ -3422,7 +3436,7 @@ export const hooksTrajectoryEnd: MCPTool = {
     } catch { /* prototype path — never blocks trajectory finalization */ }
 
     // SONA Learning - process trajectory outcome for routing optimization
-    let sonaResult: { learned: boolean; patternKey: string; confidence: number } = {
+    let sonaResult: { learned: boolean; patternKey: string; confidence: number; reinforcedNeighbour?: boolean; routingGate?: { threshold: number; confidence: number; reached: boolean; successesNeeded: number } } = {
       learned: false, patternKey: '', confidence: 0
     };
     let ewcResult: { consolidated: boolean; penalty: number } = {
@@ -3450,6 +3464,8 @@ export const hooksTrajectoryEnd: MCPTool = {
             learned: result.learned,
             patternKey: result.patternKey,
             confidence: result.confidence,
+            reinforcedNeighbour: result.reinforcedNeighbour,
+            routingGate: result.routingGate,
           };
         } catch {
           // SONA learning failed, continue without it
@@ -3618,6 +3634,8 @@ export const hooksTrajectoryEnd: MCPTool = {
         sonaUpdate: sonaResult.learned,
         sonaPatternKey: sonaResult.patternKey || undefined,
         sonaConfidence: sonaResult.confidence || undefined,
+        sonaReinforcedNeighbour: sonaResult.reinforcedNeighbour || undefined,
+        sonaRoutingGate: sonaResult.routingGate,
         ewcConsolidation: ewcResult.consolidated,
         ewcPenalty: ewcResult.penalty || undefined,
         patternsExtracted,
@@ -4393,12 +4411,12 @@ export const hooksIntelligenceLearn: MCPTool = {
 // Intelligence attention hook
 export const hooksIntelligenceAttention: MCPTool = {
   name: 'hooks_intelligence_attention',
-  description: 'Compute attention-weighted similarity using MoE/Flash/Hyperbolic Use when native Bash hooks (via Claude Code\'s settings.json) are wrong because you need Ruflo-side state — pattern persistence, neural training signals, model-routing learning, cost tracking, audit chain. For one-off shell commands, plain Bash hooks are fine.',
+  description: 'Compute attention-weighted similarity using MoE/Flash. Use when native Bash hooks (via Claude Code\'s settings.json) are wrong because you need Ruflo-side state — pattern persistence, neural training signals, model-routing learning, cost tracking, audit chain. For one-off shell commands, plain Bash hooks are fine.',
   inputSchema: {
     type: 'object',
     properties: {
       query: { type: 'string', description: 'Query for attention computation' },
-      mode: { type: 'string', description: 'Attention mode (flash, moe, hyperbolic)' },
+      mode: { type: 'string', description: 'Attention mode (flash, moe)' },
       topK: { type: 'number', description: 'Top-k results' },
     },
     required: ['query'],
@@ -4410,6 +4428,12 @@ export const hooksIntelligenceAttention: MCPTool = {
     const startTime = performance.now();
 
     { const v = validateText(query, 'query'); if (!v.valid) return { success: false, error: v.error }; }
+    // #3548: only flash and moe have an implementation. Any other mode
+    // (including the previously advertised 'hyperbolic') used to return an
+    // empty stub whose note blamed a missing package; say so instead.
+    if (mode !== 'flash' && mode !== 'moe') {
+      return { success: false, error: `Attention mode "${mode}" is not implemented; supported modes: flash, moe` };
+    }
 
     let implementation = 'placeholder';
     let embeddingSource: 'onnx' | 'hash-fallback' | 'none' = 'none';
@@ -4589,7 +4613,7 @@ export const hooksIntelligenceAttention: MCPTool = {
         implementation,
         _embeddingSource: embeddingSource,
         _stub: implementation === 'none',
-        _note: implementation === 'none' ? 'No attention backend available. Install @ruvector/attention for real computation.' : undefined,
+        _note: implementation === 'none' ? 'No attention backend available: flash/moe attention from @claude-flow/neural could not be loaded or failed.' : undefined,
         ...(embeddingSource === 'hash-fallback' && implementation !== 'none'
           ? { _embeddingNote: 'Query embeddings are hash-based (not semantic). Install @claude-flow/embeddings for real ONNX embeddings.' }
           : {}),
@@ -4811,6 +4835,10 @@ const activeWorkers: Map<string, {
   phase: string;
   startedAt: Date;
   completedAt?: Date;
+  /** True when this record was created by the in-process detect path, not a real executor. */
+  synthetic?: boolean;
+  /** Why the worker record is synthetic, propagated to worker-status/list. */
+  note?: string;
 }> = new Map();
 
 let workerIdCounter = 0;
@@ -5090,6 +5118,7 @@ export const hooksWorkerStatus: MCPTool = {
       workers,
       summary: {
         total: workers.length,
+        pending: workers.filter(w => w.status === 'pending').length,
         running: workers.filter(w => w.status === 'running').length,
         completed: workers.filter(w => w.status === 'completed').length,
         failed: workers.filter(w => w.status === 'failed').length,
@@ -5144,6 +5173,12 @@ export const hooksWorkerDetect: MCPTool = {
             progress: 0,
             phase: 'initializing',
             startedAt: new Date(),
+            // hooks_worker-detect has no executor. Unlike its sibling
+            // hooks_worker-dispatch, it used to silently fabricate a
+            // completed worker after 1.5s. Mark the record and response so
+            // callers cannot treat it as real analysis (#4549 automation scan).
+            synthetic: true,
+            note: 'No executor ran: hooks_worker-detect only records a synthetic worker. Use hooks_worker-dispatch with the daemon for real work.',
           });
           dispatched.push(workerId);
 
@@ -5152,13 +5187,15 @@ export const hooksWorkerDetect: MCPTool = {
             const w = activeWorkers.get(workerId);
             if (w) {
               w.progress = 100;
-              w.phase = 'completed';
+              w.phase = 'synthetic-completed';
               w.status = 'completed';
               w.completedAt = new Date();
             }
           }, 1500);
         }
         result.autoDispatched = true;
+        result.autoDispatchStatus = 'synthetic-completed';
+        result.note = 'No executor ran: these worker records are synthetic placeholders. Use hooks_worker-dispatch with the daemon for real work.';
         result.workerIds = dispatched;
       }
     }
@@ -5366,6 +5403,36 @@ function codemodLangForExt(abs: string): 'javascript' | 'typescript' | 'jsx' | '
   return 'typescript';
 }
 
+// Canonicalize a path that may not exist yet: realpath the nearest existing
+// ancestor and re-attach the missing tail, so a symlinked parent still
+// resolves to its real location (mirrors @claude-flow/security's
+// canonicalizeSync, which is not exported).
+function realpathNearest(p: string): string {
+  try {
+    return nodeFs.realpathSync(p);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+  }
+  const parent = dirname(p);
+  if (parent === p) return p;
+  return join(realpathNearest(parent), basename(p));
+}
+
+// CWE-59 (#4346): containment must compare real paths on BOTH sides — a
+// symlink inside the project pointing outside it must not pass, and a
+// symlinked project root (e.g. macOS /var -> /private/var) must not make
+// every path fail. Fails closed if canonicalization throws (ELOOP, EACCES).
+function isInsideRealRoot(realRoot: string, abs: string): boolean {
+  let real: string;
+  try {
+    real = realpathNearest(abs);
+  } catch {
+    return false;
+  }
+  const rel = relative(realRoot, real);
+  return rel === '' || (rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel));
+}
+
 // Deterministic codemod execution — the real Tier-1 path (ADR-143)
 export const hooksCodemod: MCPTool = {
   name: 'hooks_codemod',
@@ -5415,11 +5482,24 @@ export const hooksCodemod: MCPTool = {
     // Resolve the target file set (single / array / glob), with path containment.
     const resolveTargets = (): { abs: string[]; truncated: boolean; error?: string } => {
       const out = new Set<string>();
+      let realRoot: string;
+      try {
+        realRoot = realpathNearest(cwd);
+      } catch (err) {
+        return { abs: [], truncated: false, error: `cannot resolve project root: ${(err as Error).message}` };
+      }
       const addRaw = (p: string): string | undefined => {
         const v = validatePath(p, 'path');
         if (!v.valid) return v.error;
         const abs = resolve(cwd, v.sanitized);
-        if (!abs.startsWith(cwd)) return `path escapes project root: ${p}`;
+        // Anchor containment at a path-separator boundary — an unanchored
+        // `abs.startsWith(cwd)` string-prefix check would let an absolute
+        // path like `${cwd}-staging/x.ts` pass as "inside" `cwd`. Matches
+        // the pattern already used correctly elsewhere in this codebase
+        // (@claude-flow/security's `isWithinPrefix`, hooks/workers, plugins/security).
+        if (abs !== cwd && !abs.startsWith(cwd + sep)) return `path escapes project root: ${p}`;
+        // The lexical check above cannot see symlinks; re-check on real paths.
+        if (!isInsideRealRoot(realRoot, abs)) return `path escapes project root via symlink: ${p}`;
         out.add(abs);
         return undefined;
       };
@@ -5441,7 +5521,9 @@ export const hooksCodemod: MCPTool = {
         }
         for (const m of matches) {
           const abs = resolve(cwd, m);
-          if (abs.startsWith(cwd) && CODEMOD_EXTENSIONS.has(abs.slice(abs.lastIndexOf('.')).toLowerCase())) {
+          // Matches that resolve outside the root (via a symlinked file or
+          // directory) are skipped silently, like other non-matching entries.
+          if ((abs === cwd || abs.startsWith(cwd + sep)) && isInsideRealRoot(realRoot, abs) && CODEMOD_EXTENSIONS.has(abs.slice(abs.lastIndexOf('.')).toLowerCase())) {
             out.add(abs);
           }
         }
@@ -5702,6 +5784,39 @@ export const hooksIntelligenceUnifiedStats: MCPTool = {
   },
 };
 
+/**
+ * #4581 / ADR-502: ingest the ruflo-mods learning loop's verified outcomes.
+ * Never throws; null when the module or SONA is unavailable.
+ */
+async function ingestVerifiedQuietly(force = false) {
+  try {
+    const { ingestVerifiedOutcomes } = await import('../memory/verified-outcomes.js');
+    const sona = await getSONAOptimizer();
+    return await ingestVerifiedOutcomes({ force, sona: sona as never });
+  } catch {
+    return null;
+  }
+}
+
+export const hooksVerifiedIngest: MCPTool = {
+  name: 'hooks_intelligence_verified-ingest',
+  description: 'Ingest the ruflo-mods learning loop\'s recorded turns (.claude-flow/data/verified-trajectories.jsonl, #4581): turns a test, build or typecheck process verified train SONA; unverified turns are counted and never train. Writes .claude-flow/data/learned-lessons.json (patterns at or above the 0.6 routing gate, plus repeated verified failures as cautions). hooks_route and hooks_session-end already ingest automatically; call this to see the counts or to force a re-read. Use when native Bash hooks (via Claude Code\'s settings.json) are wrong because the outcome must reach Ruflo-side state — SONA pattern persistence and routing — and must be gated on a verifier\'s exit status rather than recorded unconditionally.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      dryRun: { type: 'boolean', description: 'Count only: train nothing and write nothing' },
+      force: { type: 'boolean', description: 'Re-read the file even if it has not changed since the last ingest' },
+    },
+  },
+  handler: async (params: Record<string, unknown>) => {
+    const { ingestVerifiedOutcomes } = await import('../memory/verified-outcomes.js');
+    const sona = await getSONAOptimizer();
+    // ADR-503 §2.3: only this explicit ingest may re-verify (run project code), and only when learningLoop.reverify is on.
+    const result = await ingestVerifiedOutcomes({ dryRun: params.dryRun === true, force: params.force === true || params.dryRun === true, sona: sona as never, allowReverify: true });
+    return { success: true, ...result };
+  },
+};
+
 // Export all hooks tools
 export const hooksTools: MCPTool[] = [
   hooksIntelligenceUnifiedStats,
@@ -5731,6 +5846,7 @@ export const hooksTools: MCPTool[] = [
   hooksTrajectoryStart,
   hooksTrajectoryStep,
   hooksTrajectoryEnd,
+  hooksVerifiedIngest,
   hooksPatternStore,
   hooksPatternSearch,
   hooksIntelligenceStats,

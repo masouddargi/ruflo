@@ -14,6 +14,7 @@ import {
 import { validateEnv, validateIdentifier, validatePath, validateText } from './validate-input.js';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 
 // Storage paths
 const STORAGE_DIR = '.claude-flow';
@@ -110,7 +111,7 @@ export const terminalTools: MCPTool[] = [
       if (!vEnv.valid) return { success: false, error: vEnv.error };
 
       const store = loadTerminalStore();
-      const id = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = `term-${Date.now()}-${randomBytes(4).toString('hex')}`;
 
       const session: TerminalSession = {
         id,
@@ -168,7 +169,7 @@ export const terminalTools: MCPTool[] = [
 
       if (!session) {
         // Create default session
-        const id = `term-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const id = `term-${Date.now()}-${randomBytes(4).toString('hex')}`;
         session = {
           id,
           name: 'Default Terminal',
@@ -351,11 +352,11 @@ export const terminalTools: MCPTool[] = [
       // Return combined history from all sessions
       const allHistory = Object.values(store.sessions)
         .flatMap(s => s.history.map(h => ({ ...h, sessionId: s.id })))
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-        .slice(offset, offset + limit);
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
       return {
-        history: allHistory,
+        history: allHistory.slice(offset, offset + limit),
+        // Every stored entry, like the single-session branch, not just this page.
         total: allHistory.length,
       };
     },
